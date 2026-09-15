@@ -1,0 +1,184 @@
+# The 12-step release pipeline, expressed as hops over the ReleaseEngine state machine.
+#
+# Each step is either a "kickoff" (wait: false — our own automation triggering something,
+# auto-fired by the workflow executor) or a "result" (wait: true — a real-world outcome only
+# an external system or human can report, resolved by a manual `event` call).
+#
+# This file is validated against src/transitions.ts at load time: every fromState/event pair
+# must be a real legal transition, and resultState must match what that transition actually
+# produces. A step referencing a state or event that doesn't exist in the code fails loudly.
+steps:
+  - id: branches
+    step: 1
+    name: Create release branches
+    fromState: DRAFT
+    event: BRANCHES_CREATED
+    resultState: BRANCH_CREATED
+    wait: false
+    outputs:
+      - repos[].releaseBranch
+
+  - id: ticket_create
+    step: 2
+    name: Create PCM/Jira ticket
+    fromState: BRANCH_CREATED
+    event: TICKET_CREATED
+    resultState: CHANGE_TICKET_CREATED
+    wait: true
+    outputs:
+      - ticket.id
+      - ticket.url
+
+  - id: qa_ask
+    step: 3
+    name: Ask QA for approval
+    fromState: CHANGE_TICKET_CREATED
+    event: QA_APPROVAL_REQUESTED
+    resultState: QA_APPROVAL_PENDING
+    wait: false
+
+  - id: qa_wait
+    step: 4
+    name: WAIT for QA approval
+    fromState: QA_APPROVAL_PENDING
+    event: QA_APPROVED
+    resultState: QA_APPROVED
+    wait: true
+    outputs:
+      - approvals.qa
+
+  - id: cab_ask
+    step: 5
+    name: Ask CAB for approval
+    fromState: QA_APPROVED
+    event: CAB_APPROVAL_REQUESTED
+    resultState: CAB_APPROVAL_PENDING
+    wait: false
+
+  - id: cab_wait
+    step: 6
+    name: WAIT for CAB approval
+    fromState: CAB_APPROVAL_PENDING
+    event: CAB_APPROVED
+    resultState: CAB_APPROVED
+    wait: true
+    outputs:
+      - approvals.cab
+
+  - id: ready_check
+    step: 7
+    name: "Deploy: readiness check"
+    fromState: CAB_APPROVED
+    event: READY_CHECK_PASSED
+    resultState: READY_TO_DEPLOY
+    wait: true
+
+  - id: deploy_kickoff
+    step: 7
+    name: "Deploy: trigger"
+    fromState: READY_TO_DEPLOY
+    event: DEPLOY_REQUESTED
+    resultState: DEPLOYING
+    wait: false
+
+  - id: deploy_result
+    step: 7
+    name: "Deploy: result"
+    fromState: DEPLOYING
+    event: DEPLOY_SUCCEEDED
+    resultState: DEPLOYED
+    wait: true
+    outputs:
+      - deployment.deploymentId
+
+  - id: sanity_kickoff
+    step: 8
+    name: "Run sanity tests: start"
+    fromState: DEPLOYED
+    event: SANITY_STARTED
+    resultState: SANITY_CHECKING
+    wait: false
+
+  - id: sanity_result
+    step: 8
+    name: "Run sanity tests: result"
+    fromState: SANITY_CHECKING
+    event: SANITY_PASSED
+    resultState: SANITY_PASSED
+    wait: true
+    outputs:
+      - sanity.results
+
+  - id: ticket_update_kickoff
+    step: 9
+    name: "Update change ticket: start"
+    fromState: SANITY_PASSED
+    event: FINALIZE_REQUESTED
+    resultState: FINALIZING
+    wait: false
+
+  - id: ticket_update_result
+    step: 9
+    name: "Update change ticket: result"
+    fromState: FINALIZING
+    event: TICKET_UPDATED
+    resultState: TICKET_UPDATED
+    wait: true
+    outputs:
+      - ticket.updatedAt
+    onFailure:
+      event: TICKET_UPDATE_FAILED
+      resultState: TICKET_UPDATE_FAILED
+      retryEvent: RETRY_TICKET_UPDATE
+
+  - id: backmerge_kickoff
+    step: 10
+    name: "Create backmerge PR: start"
+    fromState: TICKET_UPDATED
+    event: BACKMERGE_REQUESTED
+    resultState: BACKMERGE_PENDING
+    wait: false
+
+  - id: backmerge_result
+    step: 10
+    name: "Create backmerge PR: result"
+    fromState: BACKMERGE_PENDING
+    event: BACKMERGE_CREATED
+    resultState: BACKMERGE_CREATED
+    wait: true
+    outputs:
+      - backmerge.prUrl
+    onFailure:
+      event: BACKMERGE_FAILED
+      resultState: BACKMERGE_FAILED
+      retryEvent: RETRY_BACKMERGE
+
+  - id: tagging_kickoff
+    step: 11
+    name: "Tag repositories: start"
+    fromState: BACKMERGE_CREATED
+    event: TAGGING_REQUESTED
+    resultState: TAGGING_PENDING
+    wait: false
+
+  - id: tagging_result
+    step: 11
+    name: "Tag repositories: result"
+    fromState: TAGGING_PENDING
+    event: REPOS_TAGGED
+    resultState: TAGGED
+    wait: true
+    outputs:
+      - repos[].tag
+    onFailure:
+      event: TAGGING_FAILED
+      resultState: TAGGING_FAILED
+      retryEvent: RETRY_TAGGING
+
+  - id: complete
+    step: 12
+    name: Complete
+    fromState: TAGGED
+    event: RELEASE_FINALIZED
+    resultState: COMPLETE
+    wait: false

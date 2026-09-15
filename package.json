@@ -1,0 +1,33 @@
+{
+  "name": "release-operator",
+  "version": "0.1.0",
+  "description": "State-machine driven release orchestration: branches, tickets, QA/CAB approvals, deploy, sanity, finalize.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "release-operator": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "mlx:serve": ".venv/bin/mlx_lm.server --model mlx-community/Qwen3-4B-Instruct-2507-4bit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "better-sqlite3": "^12.11.1",
+    "commander": "^14.0.3",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.5.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
