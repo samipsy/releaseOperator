@@ -24,8 +24,13 @@ const SYSTEM_PROMPT = [
   "You draft text and summaries for a human to review before use.",
   "You never approve, reject, or make decisions about releases, QA/CAB sign-off, feature flags,",
   "or deployments — those are handled entirely outside of you by a separate deterministic system.",
-  "Base your output only on the information given to you in the user message; do not invent",
-  "ticket IDs, approver names, commit hashes, dates, or other facts not present in the input.",
+  "Base your output ONLY on the information given to you in the user message. Do not invent",
+  "ticket IDs, approver names, commit hashes, dates, metrics, percentages, technology names,",
+  "feature flag names, or any other specific fact not present in the input — not even plausible-",
+  "sounding ones. If the input doesn't give you enough detail to be specific, say so plainly and",
+  "write generic placeholder language instead (e.g. \"this release updates the listed",
+  "repositories — see linked commits/PRs for details\"). A vague-but-true draft is always better",
+  "than a specific-but-invented one.",
   "Be direct and factual. No filler, no disclaimers, no markdown headers unless asked for.",
 ].join(" ");
 
@@ -53,15 +58,46 @@ function withSystem(content: string): ChatMessage[] {
   return [{ role: "system", content: SYSTEM_PROMPT }, userMessage(content)];
 }
 
+const JSON_ARRAY_INSTRUCTION =
+  "Respond with ONLY a JSON array of strings, nothing else — no explanation, no markdown fences.";
+
 export function ticketDescriptionPrompt(input: TicketDescriptionInput): ChatMessage[] {
+  const ticketLines = (input.tickets ?? []).map((t) => {
+    const brief = t.description?.trim() ? `: ${t.description.trim()}` : "";
+    return `  - ${t.key} — ${t.summary}${brief}`;
+  });
+
   return withSystem(
     [
       "Draft a change-management ticket description for the following release.",
       "Write 2-4 short paragraphs or a short paragraph plus a bullet list of notable changes.",
       "Do not include a title or ticket ID field — just the description body.",
+      "If a list of included tickets is provided, mention each key and title. Do not invent tickets.",
       "",
       releaseSummaryBlock(input.release),
-      input.context ? `\nAdditional context:\n${input.context}` : "",
+      ticketLines.length > 0 ? `\nTickets included in this release:\n${ticketLines.join("\n")}` : "",
+      input.context
+        ? `\nAdditional context:\n${input.context}`
+        : ticketLines.length > 0
+          ? ""
+          : "\n(No change details were provided beyond the above. Do not invent any — keep the " +
+            "description generic and note that specific changes should be filled in by the author.)",
+    ]
+      .filter((line) => line !== "")
+      .join("\n")
+  );
+}
+
+export function extractTicketKeysPrompt(input: { commits: { sha: string; message: string }[] }): ChatMessage[] {
+  const commitLines = input.commits.map((c) => `  - ${c.sha.slice(0, 8)} ${c.message}`);
+  return withSystem(
+    [
+      "Extract Jira issue keys from the commit messages below. Keys look like PCM-123 or PROJ-9.",
+      JSON_ARRAY_INSTRUCTION,
+      "Return each distinct key once. If none are present, return [].",
+      "",
+      "Commits:",
+      ...commitLines,
     ].join("\n")
   );
 }
@@ -95,13 +131,13 @@ export function releaseNotesPrompt(input: ReleaseNotesInput): ChatMessage[] {
       "heading with nothing under it.",
       "",
       releaseSummaryBlock(input.release),
-      input.changesSummary ? `\nChange summary to draw from:\n${input.changesSummary}` : "",
+      input.changesSummary
+        ? `\nChange summary to draw from:\n${input.changesSummary}`
+        : "\n(No change summary was provided. Do not invent any — keep the notes generic and " +
+          "note that specific changes should be filled in by the author.)",
     ].join("\n")
   );
 }
-
-const JSON_ARRAY_INSTRUCTION =
-  "Respond with ONLY a JSON array of strings, nothing else — no explanation, no markdown fences.";
 
 export function affectedComponentsPrompt(input: AffectedComponentsInput): ChatMessage[] {
   return withSystem(

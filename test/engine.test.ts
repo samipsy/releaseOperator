@@ -60,6 +60,13 @@ describe("ReleaseEngine", () => {
       actor: "sam",
       payload: { branches: { web: "release/1.0.0" } },
     });
+    await engine.transition(release.id, { type: "RELEASE_PR_REQUESTED", actor: "sam" });
+    await engine.transition(release.id, {
+      type: "RELEASE_PR_CREATED",
+      actor: "sam",
+      payload: { prUrls: { web: "https://github.com/ipsy/web/pull/9" } },
+    });
+    await engine.transition(release.id, { type: "TICKET_CREATE_REQUESTED", actor: "sam" });
     await engine.transition(release.id, {
       type: "TICKET_CREATED",
       actor: "sam",
@@ -114,6 +121,31 @@ describe("ReleaseEngine", () => {
     const resumed = await engine.transition(release.id, { type: "UNBLOCKED", actor: "sam" });
     expect(resumed.state).toBe("BRANCH_CREATED");
     expect(resumed.preBlockState).toBeUndefined();
+  });
+
+  it("rejects TICKET_CREATED when Jira has not recorded a ticket and no ticketId is given", async () => {
+    const release = engine.createRelease({
+      version: "1.0.0",
+      repos: [{ name: "web", sourceBranch: "main" }],
+      environment: "prod",
+      createdBy: "sam",
+    });
+    await engine.transition(release.id, {
+      type: "BRANCHES_CREATED",
+      actor: "sam",
+      payload: { branches: { web: "release/1.0.0" } },
+    });
+    await engine.transition(release.id, { type: "RELEASE_PR_REQUESTED", actor: "sam" });
+    await engine.transition(release.id, {
+      type: "RELEASE_PR_CREATED",
+      actor: "sam",
+      payload: { prUrls: { web: "https://github.com/ipsy/web/pull/9" } },
+    });
+    await engine.transition(release.id, { type: "TICKET_CREATE_REQUESTED", actor: "sam" });
+
+    await expect(engine.transition(release.id, { type: "TICKET_CREATED", actor: "sam" })).rejects.toThrow(
+      GuardFailedError
+    );
   });
 
   it("does not allow any event once a release is CANCELLED (terminal)", async () => {

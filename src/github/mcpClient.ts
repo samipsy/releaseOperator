@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { GithubServiceError } from "../errors.js";
-import type { McpToolCaller } from "./types.js";
+import type { McpToolCaller } from "../mcp/types.js";
 
 /**
  * GitHub's own hosted MCP server — "no local setup or runtime required" per

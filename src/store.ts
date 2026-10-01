@@ -64,6 +64,14 @@ export class ReleaseStore {
     return rows.map((r) => deserializeRelease(r.data));
   }
 
+  deleteReleases(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db.prepare(`DELETE FROM events WHERE release_id IN (${placeholders})`).run(...ids);
+    const result = this.db.prepare(`DELETE FROM releases WHERE id IN (${placeholders})`).run(...ids);
+    return Number(result.changes);
+  }
+
   appendEvent(entry: {
     releaseId: string;
     type: ReleaseEventType;

@@ -1,6 +1,7 @@
 import type { Release, ReleaseEvent, ReleaseEventType, ReleaseState } from "../types.js";
 import { SIDECAR_EVENTS, type ReleaseEngine } from "../engine.js";
 import { WorkflowExecutionError } from "../errors.js";
+import { runGuards } from "../guards.js";
 import type { WorkflowConfig, WorkflowStep } from "./schema.js";
 
 const MAX_HOPS = 25;
@@ -63,11 +64,16 @@ export class WorkflowExecutor {
         throw new WorkflowExecutionError(releaseId, visited);
       }
 
-      release = await this.engine.transition(releaseId, {
+      const nextEvent: ReleaseEvent = {
         type: step.event,
         payload: step.payload ?? {},
         actor: step.actor ?? "workflow-executor",
-      });
+      };
+      // Kickoff hops stay wait:false; if the previous action has not yet recorded
+      // required outputs (e.g. release PR URL), pause instead of failing the command.
+      if (!runGuards(release, nextEvent).ok) break;
+
+      release = await this.engine.transition(releaseId, nextEvent);
       fired.push({ event: step.event, resultState: release.state });
       visited.push(release.state);
     }

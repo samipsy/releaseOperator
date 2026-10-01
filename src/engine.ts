@@ -5,6 +5,7 @@ import { legalTarget, RESUME_PREVIOUS } from "./transitions.js";
 import { runGuards } from "./guards.js";
 import { buildOnEnterRegistry, runActions, type ActionDeps } from "./actions.js";
 import { GuardFailedError, IllegalTransitionError } from "./errors.js";
+import { parseAffectedServices } from "./jira/affectedServices.js";
 
 const TERMINAL_STATES: ReadonlySet<ReleaseState> = new Set(["COMPLETE", "ROLLED_BACK", "CANCELLED"]);
 
@@ -17,9 +18,13 @@ export const SIDECAR_EVENTS: ReadonlySet<ReleaseEvent["type"]> = new Set(["CI_ST
 
 export interface CreateReleaseInput {
   version: string;
-  repos: { name: string; sourceBranch: string; owner?: string }[];
+  repos: { name: string; sourceBranch: string; targetBranch?: string; owner?: string; url?: string; packageJsonPath?: string }[];
   environment: "prod" | "preprod";
   createdBy: string;
+  bump?: "major" | "minor" | "patch";
+  plannedStart?: string;
+  plannedEnd?: string;
+  affectedServices?: string[];
 }
 
 /**
@@ -38,16 +43,56 @@ function applyEventEffects(release: Release, event: ReleaseEvent): void {
       }));
       break;
     }
+    case "RELEASE_PR_REQUESTED": {
+      release.releasePr = { status: "pending", attempts: (release.releasePr?.attempts ?? 0) + 1 };
+      break;
+    }
+    case "RELEASE_PR_CREATED": {
+      const prUrls = (payload.prUrls as Record<string, string>) ?? {};
+      release.repos = release.repos.map((repo) => ({
+        ...repo,
+        releasePrUrl: prUrls[repo.name] ?? repo.releasePrUrl,
+      }));
+      release.releasePr = { ...release.releasePr, status: "success" };
+      break;
+    }
+    case "RELEASE_PR_FAILED": {
+      release.releasePr = { ...release.releasePr, status: "failed" };
+      break;
+    }
+    case "TICKET_CREATE_REQUESTED":
+    case "RETRY_TICKET_CREATE": {
+      const start = payload.plannedStart;
+      const end = payload.plannedEnd;
+      if (typeof start === "string" && start.trim()) release.plannedStart = start.trim();
+      if (typeof end === "string" && end.trim()) release.plannedEnd = end.trim();
+      const services = payload.affectedServices;
+      if (typeof services === "string" && services.trim()) {
+        release.affectedServices = parseAffectedServices(services);
+      } else if (Array.isArray(services)) {
+        release.affectedServices = services.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      }
+      break;
+    }
     case "TICKET_CREATED": {
-      release.ticket = { id: payload.ticketId as string, url: payload.ticketUrl as string | undefined };
+      const payloadId = typeof payload.ticketId === "string" ? payload.ticketId.trim() : "";
+      const payloadUrl = typeof payload.ticketUrl === "string" ? payload.ticketUrl.trim() : "";
+      const id = payloadId || release.ticket?.id;
+      if (!id) break;
+      release.ticket = {
+        ...release.ticket,
+        id,
+        url: payloadUrl || release.ticket?.url,
+      };
       break;
     }
     case "QA_APPROVAL_REQUESTED": {
-      release.approvals.qa = { status: "pending" };
+      release.approvals.qa = { ...release.approvals.qa, status: "pending" };
       break;
     }
     case "QA_APPROVED": {
       release.approvals.qa = {
+        ...release.approvals.qa,
         status: "approved",
         approvedBy: payload.approvedBy as string,
         approvedAt: new Date(),
@@ -57,6 +102,7 @@ function applyEventEffects(release: Release, event: ReleaseEvent): void {
     }
     case "QA_REJECTED": {
       release.approvals.qa = {
+        ...release.approvals.qa,
         status: "rejected",
         approvedBy: payload.rejectedBy as string | undefined,
         notes: payload.notes as string | undefined,
@@ -64,11 +110,12 @@ function applyEventEffects(release: Release, event: ReleaseEvent): void {
       break;
     }
     case "CAB_APPROVAL_REQUESTED": {
-      release.approvals.cab = { status: "pending" };
+      release.approvals.cab = { ...release.approvals.cab, status: "pending" };
       break;
     }
     case "CAB_APPROVED": {
       release.approvals.cab = {
+        ...release.approvals.cab,
         status: "approved",
         approvedBy: payload.approvedBy as string,
         approvedAt: new Date(),
@@ -78,10 +125,88 @@ function applyEventEffects(release: Release, event: ReleaseEvent): void {
     }
     case "CAB_REJECTED": {
       release.approvals.cab = {
+        ...release.approvals.cab,
         status: "rejected",
         approvedBy: payload.rejectedBy as string | undefined,
         notes: payload.notes as string | undefined,
       };
+      break;
+    }
+    case "PREPROD_PR_REQUESTED":
+    case "RETRY_PREPROD_PR": {
+      release.releasePr = { status: "pending", attempts: (release.releasePr?.attempts ?? 0) + 1 };
+      break;
+    }
+    case "PREPROD_PR_CREATED": {
+      const prUrls = (payload.prUrls as Record<string, string>) ?? {};
+      release.repos = release.repos.map((repo) => ({
+        ...repo,
+        releasePrUrl: prUrls[repo.name] ?? repo.releasePrUrl,
+      }));
+      release.releasePr = { ...release.releasePr, status: "success" };
+      break;
+    }
+    case "PREPROD_PR_FAILED": {
+      release.releasePr = { ...release.releasePr, status: "failed" };
+      break;
+    }
+    case "PREPROD_APPROVAL_REQUESTED": {
+      release.approvals.preprod = { ...release.approvals.preprod, status: "pending" };
+      break;
+    }
+    case "PREPROD_APPROVED": {
+      release.approvals.preprod = {
+        ...release.approvals.preprod,
+        status: "approved",
+        approvedBy: payload.approvedBy as string,
+        approvedAt: new Date(),
+        notes: payload.notes as string | undefined,
+      };
+      break;
+    }
+    case "PREPROD_REJECTED": {
+      release.approvals.preprod = {
+        ...release.approvals.preprod,
+        status: "rejected",
+        approvedBy: payload.rejectedBy as string | undefined,
+        notes: payload.notes as string | undefined,
+      };
+      break;
+    }
+    case "PREPROD_MERGE_REQUESTED":
+    case "RETRY_PREPROD_MERGE": {
+      release.deployment = { status: "pending", startedAt: new Date() };
+      break;
+    }
+    case "PREPROD_MERGED": {
+      const sha = typeof payload.mergeSha === "string" ? payload.mergeSha : undefined;
+      release.deployment = {
+        ...release.deployment,
+        status: "pending",
+        ...(sha ? { deploymentId: sha } : {}),
+        startedAt: release.deployment?.startedAt ?? new Date(),
+      };
+      break;
+    }
+    case "PREPROD_MERGE_FAILED": {
+      release.deployment = { ...release.deployment, status: "failed", completedAt: new Date() };
+      break;
+    }
+    case "PREPROD_DEPLOY_WATCH":
+    case "RETRY_PREPROD_DEPLOY": {
+      release.deployment = {
+        ...release.deployment,
+        status: "running",
+        startedAt: release.deployment?.startedAt ?? new Date(),
+      };
+      break;
+    }
+    case "PREPROD_DEPLOY_SUCCEEDED": {
+      release.deployment = { ...release.deployment, status: "success", completedAt: new Date() };
+      break;
+    }
+    case "PREPROD_DEPLOY_FAILED": {
+      release.deployment = { ...release.deployment, status: "failed", completedAt: new Date() };
       break;
     }
     case "DEPLOY_REQUESTED": {
@@ -176,11 +301,22 @@ export class ReleaseEngine {
 
   createRelease(input: CreateReleaseInput): Release {
     const now = new Date();
-    const repos: ReleaseRepo[] = input.repos.map((r) => ({ name: r.name, sourceBranch: r.sourceBranch, owner: r.owner }));
+    const repos: ReleaseRepo[] = input.repos.map((r) => ({
+      name: r.name,
+      sourceBranch: r.sourceBranch,
+      targetBranch: r.targetBranch,
+      owner: r.owner,
+      url: r.url,
+      packageJsonPath: r.packageJsonPath,
+    }));
 
     const release: Release = {
       id: randomUUID(),
       version: input.version,
+      bump: input.bump,
+      plannedStart: input.plannedStart,
+      plannedEnd: input.plannedEnd,
+      affectedServices: input.affectedServices,
       state: "DRAFT",
       repos,
       environment: input.environment,
@@ -212,6 +348,13 @@ export class ReleaseEngine {
 
   listReleases(): Release[] {
     return this.store.listReleases();
+  }
+
+  deleteReleasesInStates(states: ReleaseState[]): Release[] {
+    const allowed = new Set(states);
+    const matched = this.store.listReleases().filter((release) => allowed.has(release.state));
+    this.store.deleteReleases(matched.map((release) => release.id));
+    return matched;
   }
 
   getHistory(id: string) {
@@ -312,6 +455,7 @@ export class ReleaseEngine {
     });
 
     await runActions(release, event, fromState, this.actionRegistry);
+    this.store.saveRelease(release);
 
     return release;
   }

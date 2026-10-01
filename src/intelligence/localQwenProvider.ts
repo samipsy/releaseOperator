@@ -2,6 +2,7 @@ import { IntelligenceServiceError } from "../errors.js";
 import {
   affectedComponentsPrompt,
   changeSummaryPrompt,
+  extractTicketKeysPrompt,
   failureSummaryPrompt,
   releaseNotesPrompt,
   sanityTestSuggestionPrompt,
@@ -11,12 +12,14 @@ import {
 import type {
   AffectedComponentsInput,
   ChangeSummaryInput,
+  ExtractTicketKeysInput,
   FailureSummaryInput,
   IntelligenceProvider,
   ReleaseNotesInput,
   SanityTestSuggestionInput,
   TicketDescriptionInput,
 } from "./types.js";
+import { ticketKeysFromText, uniqueTicketKeys } from "./ticketKeys.js";
 
 /**
  * Verified via Hugging Face on 2026-09-14: mlx-community/Qwen3-4B-Instruct-2507-4bit is a
@@ -26,8 +29,8 @@ import type {
  */
 export const DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit";
 
-/** mlx_lm.server's documented default bind address. */
-export const DEFAULT_BASE_URL = "http://127.0.0.1:8080";
+/** mlx_lm.server bind address used by `npm run mlx:serve` (port 8081 so 8080 stays free for Jira OAuth). */
+export const DEFAULT_BASE_URL = "http://127.0.0.1:8081";
 
 export interface LocalQwenProviderOptions {
   baseUrl?: string;
@@ -129,6 +132,17 @@ export class LocalQwenProvider implements IntelligenceProvider {
 
   async generateTicketDescription(input: TicketDescriptionInput): Promise<string> {
     return this.chat(ticketDescriptionPrompt(input));
+  }
+
+  async extractTicketKeys(input: ExtractTicketKeysInput): Promise<string[]> {
+    const fromMessages = uniqueTicketKeys(input.commits.flatMap((c) => ticketKeysFromText(c.message)));
+    if (input.commits.length === 0) return [];
+    try {
+      const fromModel = uniqueTicketKeys(parseStringArray(await this.chat(extractTicketKeysPrompt(input))));
+      return uniqueTicketKeys([...fromModel, ...fromMessages]);
+    } catch {
+      return fromMessages;
+    }
   }
 
   async summarizeChanges(input: ChangeSummaryInput): Promise<string> {

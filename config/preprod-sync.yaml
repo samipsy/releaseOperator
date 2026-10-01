@@ -1,0 +1,83 @@
+# Pre-prod sync: develop → pre-prod-1, Slack approve, merge, watch Netlify.
+# Validated against src/transitions.ts. Prod PCM pipeline stays in pipeline.yaml.
+
+steps:
+  - id: preprod_pr_kickoff
+    step: 1
+    name: "Open develop → pre-prod-1 PR: start"
+    fromState: DRAFT
+    event: PREPROD_PR_REQUESTED
+    resultState: PREPROD_PR_PENDING
+    wait: false
+
+  - id: preprod_pr_result
+    step: 1
+    name: "Open develop → pre-prod-1 PR: result"
+    fromState: PREPROD_PR_PENDING
+    event: PREPROD_PR_CREATED
+    resultState: PREPROD_PR_OPEN
+    wait: false
+    outputs:
+      - repos[].releasePrUrl
+    onFailure:
+      event: PREPROD_PR_FAILED
+      resultState: PREPROD_PR_FAILED
+      retryEvent: RETRY_PREPROD_PR
+
+  - id: preprod_ask
+    step: 2
+    name: Ask Slack for pre-prod merge approval
+    fromState: PREPROD_PR_OPEN
+    event: PREPROD_APPROVAL_REQUESTED
+    resultState: PREPROD_APPROVAL_PENDING
+    wait: false
+
+  - id: preprod_wait
+    step: 3
+    name: WAIT for Slack approval
+    fromState: PREPROD_APPROVAL_PENDING
+    event: PREPROD_APPROVED
+    resultState: PREPROD_APPROVED
+    wait: true
+    outputs:
+      - approvals.preprod
+
+  - id: preprod_merge_kickoff
+    step: 4
+    name: "Merge PR into pre-prod-1: start"
+    fromState: PREPROD_APPROVED
+    event: PREPROD_MERGE_REQUESTED
+    resultState: PREPROD_MERGING
+    wait: false
+
+  - id: preprod_merge_result
+    step: 4
+    name: "Merge PR into pre-prod-1: result"
+    fromState: PREPROD_MERGING
+    event: PREPROD_MERGED
+    resultState: PREPROD_MERGED
+    wait: false
+    onFailure:
+      event: PREPROD_MERGE_FAILED
+      resultState: PREPROD_MERGE_FAILED
+      retryEvent: RETRY_PREPROD_MERGE
+
+  - id: preprod_watch_kickoff
+    step: 5
+    name: "Watch Netlify pre-prod-1 deploys: start"
+    fromState: PREPROD_MERGED
+    event: PREPROD_DEPLOY_WATCH
+    resultState: PREPROD_DEPLOYING
+    wait: false
+
+  - id: preprod_watch_result
+    step: 5
+    name: "Watch Netlify pre-prod-1 deploys: result"
+    fromState: PREPROD_DEPLOYING
+    event: PREPROD_DEPLOY_SUCCEEDED
+    resultState: COMPLETE
+    wait: false
+    onFailure:
+      event: PREPROD_DEPLOY_FAILED
+      resultState: PREPROD_DEPLOY_FAILED
+      retryEvent: RETRY_PREPROD_DEPLOY

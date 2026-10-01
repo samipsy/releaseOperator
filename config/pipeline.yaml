@@ -1,8 +1,8 @@
-# The 12-step release pipeline, expressed as hops over the ReleaseEngine state machine.
+# The release pipeline, expressed as hops over the ReleaseEngine state machine.
 #
-# Each step is either a "kickoff" (wait: false — our own automation triggering something,
-# auto-fired by the workflow executor) or a "result" (wait: true — a real-world outcome only
-# an external system or human can report, resolved by a manual `event` call).
+# Each step is either a kickoff (wait: false — our automation) or a wait (wait: true —
+# a human or external system must report). Results our own actions already produced
+# (release PR URL, PCM ticket key) are wait: false so they auto-confirm.
 #
 # This file is validated against src/transitions.ts at load time: every fromState/event pair
 # must be a real legal transition, and resultState must match what that transition actually
@@ -18,19 +18,53 @@ steps:
     outputs:
       - repos[].releaseBranch
 
-  - id: ticket_create
+  - id: release_pr_kickoff
     step: 2
-    name: Create PCM/Jira ticket
+    name: "Open release PR to main: start"
     fromState: BRANCH_CREATED
+    event: RELEASE_PR_REQUESTED
+    resultState: RELEASE_PR_PENDING
+    wait: false
+
+  - id: release_pr_result
+    step: 2
+    name: "Open release PR to main: result"
+    fromState: RELEASE_PR_PENDING
+    event: RELEASE_PR_CREATED
+    resultState: RELEASE_PR_OPEN
+    wait: false
+    outputs:
+      - repos[].releasePrUrl
+    onFailure:
+      event: RELEASE_PR_FAILED
+      resultState: RELEASE_PR_FAILED
+      retryEvent: RETRY_RELEASE_PR
+
+  - id: ticket_create_kickoff
+    step: 3
+    name: "Create PCM/Jira ticket: start"
+    fromState: RELEASE_PR_OPEN
+    event: TICKET_CREATE_REQUESTED
+    resultState: TICKET_CREATE_PENDING
+    wait: false
+
+  - id: ticket_create_result
+    step: 3
+    name: "Create PCM/Jira ticket: result"
+    fromState: TICKET_CREATE_PENDING
     event: TICKET_CREATED
     resultState: CHANGE_TICKET_CREATED
-    wait: true
+    wait: false
     outputs:
       - ticket.id
       - ticket.url
+    onFailure:
+      event: TICKET_CREATE_FAILED
+      resultState: TICKET_CREATE_FAILED
+      retryEvent: RETRY_TICKET_CREATE
 
   - id: qa_ask
-    step: 3
+    step: 4
     name: Ask QA for approval
     fromState: CHANGE_TICKET_CREATED
     event: QA_APPROVAL_REQUESTED
@@ -38,7 +72,7 @@ steps:
     wait: false
 
   - id: qa_wait
-    step: 4
+    step: 5
     name: WAIT for QA approval
     fromState: QA_APPROVAL_PENDING
     event: QA_APPROVED
@@ -48,7 +82,7 @@ steps:
       - approvals.qa
 
   - id: cab_ask
-    step: 5
+    step: 6
     name: Ask CAB for approval
     fromState: QA_APPROVED
     event: CAB_APPROVAL_REQUESTED
@@ -56,7 +90,7 @@ steps:
     wait: false
 
   - id: cab_wait
-    step: 6
+    step: 7
     name: WAIT for CAB approval
     fromState: CAB_APPROVAL_PENDING
     event: CAB_APPROVED
@@ -65,16 +99,16 @@ steps:
     outputs:
       - approvals.cab
 
-  - id: ready_check
-    step: 7
-    name: "Deploy: readiness check"
+  - id: change_applied_after_cab
+    step: 8
+    name: WAIT for PCM Change Applied
     fromState: CAB_APPROVED
-    event: READY_CHECK_PASSED
-    resultState: READY_TO_DEPLOY
+    event: CHANGE_APPLIED
+    resultState: CHANGE_APPLIED
     wait: true
 
   - id: deploy_kickoff
-    step: 7
+    step: 8
     name: "Deploy: trigger"
     fromState: READY_TO_DEPLOY
     event: DEPLOY_REQUESTED
@@ -82,7 +116,7 @@ steps:
     wait: false
 
   - id: deploy_result
-    step: 7
+    step: 8
     name: "Deploy: result"
     fromState: DEPLOYING
     event: DEPLOY_SUCCEEDED
@@ -92,7 +126,7 @@ steps:
       - deployment.deploymentId
 
   - id: sanity_kickoff
-    step: 8
+    step: 9
     name: "Run sanity tests: start"
     fromState: DEPLOYED
     event: SANITY_STARTED
@@ -100,7 +134,7 @@ steps:
     wait: false
 
   - id: sanity_result
-    step: 8
+    step: 9
     name: "Run sanity tests: result"
     fromState: SANITY_CHECKING
     event: SANITY_PASSED
@@ -110,7 +144,7 @@ steps:
       - sanity.results
 
   - id: ticket_update_kickoff
-    step: 9
+    step: 10
     name: "Update change ticket: start"
     fromState: SANITY_PASSED
     event: FINALIZE_REQUESTED
@@ -118,7 +152,7 @@ steps:
     wait: false
 
   - id: ticket_update_result
-    step: 9
+    step: 10
     name: "Update change ticket: result"
     fromState: FINALIZING
     event: TICKET_UPDATED
@@ -131,16 +165,24 @@ steps:
       resultState: TICKET_UPDATE_FAILED
       retryEvent: RETRY_TICKET_UPDATE
 
-  - id: backmerge_kickoff
-    step: 10
-    name: "Create backmerge PR: start"
+  - id: change_applied_wait
+    step: 11
+    name: WAIT for PCM Change Applied
     fromState: TICKET_UPDATED
+    event: CHANGE_APPLIED
+    resultState: CHANGE_APPLIED
+    wait: true
+
+  - id: backmerge_kickoff
+    step: 12
+    name: "Create backmerge PR: start"
+    fromState: CHANGE_APPLIED
     event: BACKMERGE_REQUESTED
     resultState: BACKMERGE_PENDING
     wait: false
 
   - id: backmerge_result
-    step: 10
+    step: 12
     name: "Create backmerge PR: result"
     fromState: BACKMERGE_PENDING
     event: BACKMERGE_CREATED
@@ -154,7 +196,7 @@ steps:
       retryEvent: RETRY_BACKMERGE
 
   - id: tagging_kickoff
-    step: 11
+    step: 13
     name: "Tag repositories: start"
     fromState: BACKMERGE_CREATED
     event: TAGGING_REQUESTED
@@ -162,7 +204,7 @@ steps:
     wait: false
 
   - id: tagging_result
-    step: 11
+    step: 13
     name: "Tag repositories: result"
     fromState: TAGGING_PENDING
     event: REPOS_TAGGED
@@ -176,7 +218,7 @@ steps:
       retryEvent: RETRY_TAGGING
 
   - id: complete
-    step: 12
+    step: 14
     name: Complete
     fromState: TAGGED
     event: RELEASE_FINALIZED

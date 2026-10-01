@@ -33,14 +33,14 @@ function chatCompletionResponse(content: string) {
 describe("LocalQwenProvider", () => {
   it("sends the expected request shape to /v1/chat/completions", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(chatCompletionResponse("Drafted description."));
-    const provider = new LocalQwenProvider({ fetchImpl, baseUrl: "http://127.0.0.1:8080" });
+    const provider = new LocalQwenProvider({ fetchImpl, baseUrl: "http://127.0.0.1:8081" });
 
     const result = await provider.generateTicketDescription({ release: makeRelease() });
 
     expect(result).toBe("Drafted description.");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe("http://127.0.0.1:8080/v1/chat/completions");
+    expect(url).toBe("http://127.0.0.1:8081/v1/chat/completions");
     expect(init.method).toBe("POST");
 
     const body = JSON.parse(init.body);
@@ -146,6 +146,24 @@ describe("LocalQwenProvider", () => {
     const status = await provider.status();
 
     expect(status.reachable).toBe(false);
+  });
+
+  it("extracts ticket keys from the model response and unions them with regex matches", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(chatCompletionResponse('["PCM-9"]'));
+    const provider = new LocalQwenProvider({ fetchImpl });
+    const keys = await provider.extractTicketKeys({
+      commits: [{ sha: "abc123def456", message: "PCM-8 and a follow-up" }],
+    });
+    expect(keys).toEqual(["PCM-9", "PCM-8"]);
+  });
+
+  it("falls back to regex keys when the MLX server is unreachable", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    const provider = new LocalQwenProvider({ fetchImpl });
+    const keys = await provider.extractTicketKeys({
+      commits: [{ sha: "abc123def456", message: "PCM-3 checkout" }],
+    });
+    expect(keys).toEqual(["PCM-3"]);
   });
 
   it("summarizes commits and pull requests without needing a release", async () => {

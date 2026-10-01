@@ -34,6 +34,11 @@ async function driveToBackmergePending(engine: ReleaseEngine, workflow: Workflow
     actor: "sam",
     payload: { branches: { web: "release/1.0.0" } },
   });
+  await workflow.advance(release.id, {
+    type: "RELEASE_PR_CREATED",
+    actor: "sam",
+    payload: { prUrls: { web: "https://github.com/ipsy/web/pull/9" } },
+  });
   await workflow.advance(release.id, { type: "TICKET_CREATED", actor: "sam", payload: { ticketId: "PCM-1" } });
   await workflow.advance(release.id, {
     type: "QA_APPROVED",
@@ -45,26 +50,21 @@ async function driveToBackmergePending(engine: ReleaseEngine, workflow: Workflow
     actor: "cab-bot",
     payload: { approvedBy: "cab-lead" },
   });
-  await workflow.advance(release.id, { type: "CI_STATUS_REPORTED", actor: "ci-bot", payload: { status: "green" } });
-  await workflow.advance(release.id, { type: "READY_CHECK_PASSED", actor: "sam" });
-  await workflow.advance(release.id, {
-    type: "DEPLOY_SUCCEEDED",
-    actor: "deploy-bot",
-    payload: { deploymentId: "dep-1" },
-  });
-  await workflow.advance(release.id, { type: "SANITY_PASSED", actor: "test-bot", payload: {} });
-  const { release: afterTicketUpdate } = await workflow.advance(release.id, {
-    type: "TICKET_UPDATED",
-    actor: "jira-bot",
-    payload: { notes: "release notes attached" },
+  const { release: afterChangeApplied } = await workflow.advance(release.id, {
+    type: "CHANGE_APPLIED",
+    actor: "sam",
   });
 
-  return { releaseId: release.id, release: afterTicketUpdate };
+  return { releaseId: release.id, release: afterChangeApplied };
 }
 
 describe("workflow config loader", () => {
   it("accepts the shipped pipeline config and matches every step against the real transition table", () => {
     expect(() => loadWorkflowConfig(PIPELINE_PATH)).not.toThrow();
+  });
+
+  it("accepts the preprod-sync config against the transition table", () => {
+    expect(() => loadWorkflowConfig("config/preprod-sync.yaml")).not.toThrow();
   });
 
   it("rejects a config step referencing a nonexistent event", () => {
@@ -129,6 +129,11 @@ describe("WorkflowExecutor.advance", () => {
       actor: "sam",
       payload: { branches: { web: "release/1.0.0" } },
     });
+    await workflow.advance(release.id, {
+      type: "RELEASE_PR_CREATED",
+      actor: "sam",
+      payload: { prUrls: { web: "https://github.com/ipsy/web/pull/9" } },
+    });
     await workflow.advance(release.id, { type: "TICKET_CREATED", actor: "sam", payload: { ticketId: "PCM-1" } });
 
     const { release: afterQaApproval, fired } = await workflow.advance(release.id, {
@@ -141,6 +146,44 @@ describe("WorkflowExecutor.advance", () => {
     expect(afterQaApproval.state).toBe("CAB_APPROVAL_PENDING");
     // The chain must stop at the WAIT point, not also fire CAB_APPROVED.
     expect(fired.map((f) => f.event)).not.toContain("CAB_APPROVED");
+  });
+
+  it("jumps from CAB_APPROVED to CHANGE_APPLIED and auto-starts the backmerge", async () => {
+    const release = engine.createRelease({
+      version: "1.0.0",
+      repos: [{ name: "web", sourceBranch: "main" }],
+      environment: "prod",
+      createdBy: "sam",
+    });
+    await workflow.advance(release.id, {
+      type: "BRANCHES_CREATED",
+      actor: "sam",
+      payload: { branches: { web: "release/1.0.0" } },
+    });
+    await workflow.advance(release.id, {
+      type: "RELEASE_PR_CREATED",
+      actor: "sam",
+      payload: { prUrls: { web: "https://github.com/ipsy/web/pull/9" } },
+    });
+    await workflow.advance(release.id, { type: "TICKET_CREATED", actor: "sam", payload: { ticketId: "PCM-1" } });
+    await workflow.advance(release.id, {
+      type: "QA_APPROVED",
+      actor: "qa-bot",
+      payload: { approvedBy: "qa-lead" },
+    });
+    await workflow.advance(release.id, {
+      type: "CAB_APPROVED",
+      actor: "cab-bot",
+      payload: { approvedBy: "cab-lead" },
+    });
+
+    const { release: after, fired } = await workflow.advance(release.id, {
+      type: "CHANGE_APPLIED",
+      actor: "sam",
+    });
+
+    expect(after.state).toBe("BACKMERGE_PENDING");
+    expect(fired.map((f) => f.event)).toContain("BACKMERGE_REQUESTED");
   });
 
   it("propagates a guard failure without mutating release state or swallowing it into BLOCKED", async () => {
@@ -182,7 +225,7 @@ describe("WorkflowExecutor.advance", () => {
     expect(ciEvent?.outcome).toBe("APPLIED");
   });
 
-  it("tracks backmerge PR creation with independent failure/retry (step 10)", async () => {
+  it("tracks backmerge PR creation with independent failure/retry (step 12)", async () => {
     const { releaseId, release } = await driveToBackmergePending(engine, workflow);
     expect(release.state).toBe("BACKMERGE_PENDING");
 
@@ -209,7 +252,7 @@ describe("WorkflowExecutor.advance", () => {
     expect(fired.map((f) => f.event)).toContain("TAGGING_REQUESTED");
   });
 
-  it("tracks repo tagging with independent failure/retry (step 11) and only sets tags on success", async () => {
+  it("tracks repo tagging with independent failure/retry (step 13) and only sets tags on success", async () => {
     const { releaseId } = await driveToBackmergePending(engine, workflow);
     await workflow.advance(releaseId, {
       type: "BACKMERGE_CREATED",
@@ -252,7 +295,7 @@ describe("WorkflowExecutor.describeStatus", () => {
 
     const status = workflow.describeStatus(release);
 
-    expect(status).toMatchObject({ phase: "failed", step: 11, retryEvent: "RETRY_TAGGING" });
+    expect(status).toMatchObject({ phase: "failed", step: 13, retryEvent: "RETRY_TAGGING" });
   });
 
   it("reports a terminal release", async () => {

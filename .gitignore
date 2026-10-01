@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.DS_Store
+.venv/
+.github-token
+.github-repos.json
+.jira-token
+.jira-oauth.json
+.github-watch.lock
+.env
+.env.local

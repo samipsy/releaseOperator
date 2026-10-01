@@ -46,3 +46,24 @@ export class GithubServiceError extends Error {
     this.name = "GithubServiceError";
   }
 }
+
+export class JiraServiceError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = "JiraServiceError";
+  }
+}
+
+export class SlackServiceError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = "SlackServiceError";
+  }
+}
+
+export class NetlifyServiceError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = "NetlifyServiceError";
+  }
+}

@@ -8,6 +8,7 @@ import type { Release } from "../types.js";
  */
 export interface IntelligenceProvider {
   generateTicketDescription(input: TicketDescriptionInput): Promise<string>;
+  extractTicketKeys(input: ExtractTicketKeysInput): Promise<string[]>;
   summarizeChanges(input: ChangeSummaryInput): Promise<string>;
   generateReleaseNotes(input: ReleaseNotesInput): Promise<string>;
   identifyAffectedComponents(input: AffectedComponentsInput): Promise<string[]>;
@@ -19,6 +20,12 @@ export interface TicketDescriptionInput {
   release: Release;
   /** Free-form extra context: notable commits, scope notes, links, etc. */
   context?: string;
+  /** Tickets parsed from release-branch commits, with Jira title/summary filled in. */
+  tickets?: { key: string; summary: string; description?: string }[];
+}
+
+export interface ExtractTicketKeysInput {
+  commits: CommitInfo[];
 }
 
 export interface CommitInfo {

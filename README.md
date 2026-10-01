@@ -1,10 +1,14 @@
 # release-operator
 
-A state-machine driven engine for release orchestration: create branches, cut a change
-ticket, get QA and CAB approval, deploy, run sanity checks, backmerge, tag, and finalize —
-with every transition logged so you can answer "what happened" after the fact. A declarative
-YAML pipeline config drives the whole thing end to end, auto-advancing through automatic steps
-and stopping cleanly at real wait points.
+A state-machine driven engine for release orchestration: create branches, open a
+release PR to main, cut a change ticket, get QA and CAB approval, deploy, run sanity
+checks, backmerge, tag, and finalize — with every transition logged so you can answer
+"what happened" after the fact. A declarative YAML pipeline config drives the whole
+thing end to end, auto-advancing through automatic steps and stopping cleanly at real
+wait points.
+
+**New here?** See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full system design, the
+reasoning behind the layering, and where to look for each concern.
 
 ## Concepts
 
@@ -18,14 +22,13 @@ and stopping cleanly at real wait points.
   (e.g. before `READY_TO_DEPLOY`: branches exist, ticket exists, QA/CAB approved, CI
   green, feature flags known).
 - **Actions** (`src/actions.ts`) — side effects run after entering a new state. GitHub
-  (branch creation, backmerge PR, tagging) is wired for real — see "GitHub integration"
-  below. Slack/Jira/deploy/test are still stubbed (logged to stderr); swap those function
-  bodies for real integrations without touching the engine.
+  (branch creation, backmerge PR, tagging), Jira (ticket create/comment via 3LO), and Slack
+  (channel posts + QA/CAB thread ingest) are wired for real. Deploy/test are still stubbed.
 - **Event log** (`src/store.ts`, SQLite `events` table) — every attempted transition is
   recorded, applied or rejected, with the reason. `releases.data` holds the current
   record as JSON for simplicity; `events` is the append-only source of truth for history.
 - **Workflow config** (`config/pipeline.yaml`, `src/workflow/`) — a declarative description
-  of the 12-step release pipeline as an ordered set of hops over the state machine above.
+  of the 13-step release pipeline as an ordered set of hops over the state machine above.
   Loaded and validated against the *real* transition table at startup (`src/workflow/loader.ts`),
   so a step referencing a state/event that doesn't exist in the code fails loudly rather than
   drifting silently. `WorkflowExecutor.advance()` (`src/workflow/executor.ts`) applies an
@@ -35,17 +38,16 @@ and stopping cleanly at real wait points.
 ## State machine
 
 ```
-DRAFT -> BRANCH_CREATED -> CHANGE_TICKET_CREATED -> QA_APPROVAL_PENDING -> QA_APPROVED
-      -> CAB_APPROVAL_PENDING -> CAB_APPROVED -> READY_TO_DEPLOY -> DEPLOYING -> DEPLOYED
-      -> SANITY_CHECKING -> SANITY_PASSED -> FINALIZING -> TICKET_UPDATED
-      -> BACKMERGE_PENDING -> BACKMERGE_CREATED -> TAGGING_PENDING -> TAGGED -> COMPLETE
+DRAFT -> BRANCH_CREATED -> RELEASE_PR_OPEN -> CHANGE_TICKET_CREATED -> QA_APPROVAL_PENDING -> QA_APPROVED
+      -> CAB_APPROVAL_PENDING -> CAB_APPROVED -> CHANGE_APPLIED -> BACKMERGE_PENDING -> BACKMERGE_CREATED
+      -> TAGGING_PENDING -> TAGGED -> COMPLETE
 ```
 
 Side paths: `QA_REJECTED`/`CAB_REJECTED` send it back a step; `BLOCKED`/`UNBLOCKED` pause
 and resume from any non-terminal state; `CANCELLED` and `ROLLBACK_REQUESTED` are
 available from most in-flight states; `DEPLOY_FAILED`/`SANITY_FAILED` land in `FAILED`,
-which can still be rolled back or cancelled. The three finalize sub-steps
-(`TICKET_UPDATE_FAILED`, `BACKMERGE_FAILED`, `TAGGING_FAILED`) each retry independently via
+which can still be rolled back or cancelled. Independent retry paths
+(`RELEASE_PR_FAILED`, `TICKET_UPDATE_FAILED`, `BACKMERGE_FAILED`, `TAGGING_FAILED`) each retry via
 their own `RETRY_*` event, without redoing the others. `COMPLETE`, `ROLLED_BACK`, and
 `CANCELLED` are terminal. See `src/transitions.ts` for the exact table.
 
@@ -85,7 +87,7 @@ Instruct-2507-4bit` is the correct current pick, not an outdated one.)
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install mlx-lm
-npm run mlx:serve   # starts mlx_lm.server on http://127.0.0.1:8080, downloads the model on first run
+npm run mlx:serve   # starts mlx_lm.server on http://127.0.0.1:8081, downloads the model on first run
 ```
 
 (A venv is required on Homebrew Python — it's externally managed and refuses global `pip
@@ -116,6 +118,18 @@ Everything prints to stdout for you to copy into Jira/Slack/PR descriptions/etc.
 the server isn't running, commands fail with a clear "could not reach the MLX-LM server"
 message rather than hanging or silently falling back.
 
+**Also wired into the pipeline itself** (`src/actions.ts`), not just the manual CLI commands:
+entering `TICKET_CREATE_PENDING` (after release branches exist) compares each repo's
+`releaseBranch` to `sourceBranch` (usually `main`) via GitHub, parses Jira keys from those
+commit messages (regex plus the SLM), fetches each ticket's title and a short description from
+Jira, and drafts the change-ticket body from that list. Entering `CHANGE_TICKET_CREATED` patches
+each open release PR description with that PCM ticket key. Entering `FINALIZING` drafts release
+notes. Both are printed to stderr during `event` for a human to review, with no effect on
+`ReleaseState` (a failed or skipped draft never blocks the transition). Drafts are labeled
+"SLM-drafted ... — VERIFY before use". If GitHub is not configured, ticket keys cannot be
+discovered from commits. If the compare against main is empty (branch just cut from main),
+the operator falls back to commits since the latest git tag.
+
 ## GitHub integration
 
 Real, not stubbed: branch creation and backmerge PRs go through GitHub's **remote** MCP
@@ -143,19 +157,110 @@ a plain authenticated REST call, using the same token.
 **Setup:**
 
 ```bash
+export RELEASE_OPERATOR_GITHUB_ORG=ipsy
 export RELEASE_OPERATOR_GITHUB_TOKEN=github_pat_...   # fine-grained PAT: Contents (RW), Pull requests (RW)
 npm run cli -- github status                          # confirms the remote server is reachable
+npm run cli -- github sync-repos                      # writes .github-repos.json name→URL table
+npm run cli -- github repos                           # show the local catalog
+npm run cli -- github repos add --from-dir ../my-clone  # test URL from a local clone (survives sync)
+# or: github repos add --name experience-main --url https://github.com/myglam/experience/blob/main/app/package.json
 ```
 
-Optional: `RELEASE_OPERATOR_GITHUB_MCP_URL` to point at a different toolset URL or a GitHub
-Enterprise remote server; `RELEASE_OPERATOR_GITHUB_ORG` as the default owner/org for any repo
-that doesn't specify one (`--repos owner/name:branch` on `create` sets it per-repo).
+Optional: `RELEASE_OPERATOR_GITHUB_MCP_URL` for a different MCP endpoint.
+`create` takes only **release type** (`major` | `minor` | `patch`) and **repo name** (prompts
+if omitted). Interactive create also asks for source (default develop) and target (default
+main) unless you pass `--source` / `--target`. It looks up the repo in the local catalog, then always reads `package.json` from
+GitHub Contents API (never from disk): `app/package.json` first, then root `package.json`
+if that path 404s. `--source` is the branch to cut from (and read package.json); `--target`
+is the branch the release PR merges into. Defaults: source `develop`, target `main`.
+`--branch` is a deprecated alias for `--source`. Optional `--env` (default `prod`) and `--by`.
+You can pin a nested file on the catalog with a blob URL:
+
+```bash
+npm run cli -- github repos add --name experience-main --url https://github.com/myglam/experience/blob/main/app/package.json
+npm run cli -- create patch experience-main
+```
+Re-run `github sync-repos` when the org gains repos. Manual `github repos add` rows are kept
+(same short name overrides the synced URL — useful for a workspace test clone).
 
 If `RELEASE_OPERATOR_GITHUB_TOKEN` isn't set, the branch/PR/tag actions simply log
 "skipped: GitHub integration not configured" and no-op — the rest of the pipeline is
 unaffected either way (this is real automation *inside* an action, same best-effort semantics
 as every other action: a failure here is logged loudly but never blocks or reverses the
 already-persisted state transition).
+
+## Jira integration (Atlassian 3LO)
+
+Ticket create/comment run through `JiraProvider`. The default path is Atlassian **3LO**
+(authorization-code OAuth) talking to Jira Cloud REST. Email + API token against Atlassian's
+remote MCP server remains a fallback.
+
+Atlassian only issues a **refresh token** if the authorize request includes `offline_access`
+(this CLI always adds that scope). Access tokens last about an hour.
+
+**Setup:**
+
+Copy [`.env.example`](./.env.example) to `.env` (gitignored) and fill in the values. The CLI
+loads `.env` on startup; variables already set in your shell win.
+
+```bash
+cp .env.example .env
+# edit .env:
+# RELEASE_OPERATOR_JIRA_OAUTH_CLIENT_ID=...
+# RELEASE_OPERATOR_JIRA_OAUTH_CLIENT_SECRET=...
+# RELEASE_OPERATOR_JIRA_SITE=https://your-site.atlassian.net
+# RELEASE_OPERATOR_JIRA_PROJECT_KEY=PCM
+
+# Callback URL registered in the Atlassian app (mlx_lm uses 8081, so 8080 is free):
+#   http://localhost:8080/callback
+npm run cli -- jira login
+npm run cli -- jira status
+```
+
+`jira login` opens the consent screen, catches the callback, and writes access/refresh tokens
+to `./.jira-oauth.json` (gitignored, mode 0600). Put the OAuth **app** id/secret in `.env`;
+prefer the token store for the short-lived access token.
+
+If you already have a short-lived access token in the environment:
+
+```bash
+export RELEASE_OPERATOR_JIRA_OAUTH_ACCESS_TOKEN=...
+npm run cli -- jira login --import-env
+```
+
+That import cannot refresh; run a full `jira login` (with `offline_access`) for a refresh token.
+
+Optional: `RELEASE_OPERATOR_JIRA_CLOUD_ID`, `RELEASE_OPERATOR_JIRA_OAUTH_REDIRECT_URI`,
+`RELEASE_OPERATOR_JIRA_OAUTH_STORE`. Required Jira *create* fields (Epic, custom fields) belong
+in `.env` as `RELEASE_OPERATOR_JIRA_PARENT_KEY` and optional `RELEASE_OPERATOR_JIRA_EXTRA_FIELDS`
+JSON — ticket create is auto-fired after branches, so CLI flags would be easy to miss.
+API-token fallback:
+`RELEASE_OPERATOR_JIRA_EMAIL` + `RELEASE_OPERATOR_JIRA_TOKEN` + `RELEASE_OPERATOR_JIRA_SITE`.
+
+## Slack integration
+
+Posts use Slack's Web API (`chat.postMessage`), not incoming webhooks, so the same bot can
+read QA/CAB reply threads (`conversations.replies`).
+
+1. Create a Slack app with bot scopes `chat:write`, `channels:history` (or `groups:history`
+   for private channels), and `users:read`.
+2. Install it to the workspace and invite the bot to the channel.
+3. Set `RELEASE_OPERATOR_SLACK_BOT_TOKEN` and `RELEASE_OPERATOR_SLACK_CHANNEL` (prefer the
+   `C…` channel id).
+
+```bash
+npm run cli -- slack ping
+npm run watch:github                # GitHub PR reviews for pre-prod (every 60s)
+npm run cli -- github watch --status
+npm run cli -- slack ingest-approvals <releaseId>   # one-shot Slack read (QA/CAB only)
+npm run cli -- netlify deploys landings
+npm run cli -- preprod create landings
+# develop → pre-prod-1 PR; Approve on GitHub; watch:github merges and watches Netlify
+```
+
+`mlx:serve` is only the local Qwen HTTP inference process. `watch:github` polls **GitHub PR reviews** for pre-prod (Approve / Request changes) about once a minute, then merges and watches Netlify. It does not poll Slack. After a pre-prod merge it still *posts* Slack thread replies that the PR is merged and that the build succeeded.
+
+Manual `event QA_APPROVED --payload '{"approvedBy":"..."}'` still works.
 
 ## Usage
 
@@ -165,41 +270,58 @@ npm test              # run the full test suite (engine + workflow)
 npm run cli -- --help # run the CLI via tsx (no build step needed)
 ```
 
-By default the CLI stores state in `./release-operator.db` (SQLite) and loads the pipeline
-from `./config/pipeline.yaml`. Override with `RELEASE_OPERATOR_DB=/path/to/file.db` and
-`RELEASE_OPERATOR_WORKFLOW=/path/to/pipeline.yaml`.
+By default the CLI loads `./.env` if present (does not override existing shell variables),
+stores state in `./release-operator.db`, and reads `./config/pipeline.yaml`. Override with
+`RELEASE_OPERATOR_ENV_FILE`, `RELEASE_OPERATOR_DB`, and `RELEASE_OPERATOR_WORKFLOW`.
 
 ```bash
-# Create a release
-npm run cli -- create 1.0.0 --repos web:main,api:main --env prod --by sam
+# Create a release (prompts for major|minor|patch, then repo name)
+npm run cli -- create
+npm run cli -- create minor blog-microfrontend --source develop --target main
+# TTY also asks planned start / planned end (PCM change window)
 
-# Drive it forward — `event` auto-advances through non-wait steps for you
-npm run cli -- event <releaseId> BRANCHES_CREATED --by sam \
+# Drive it forward — omit the release id to use the latest non-cancelled one.
+# `--by` defaults to your login. Commands are actions (create_branch), not past-tense facts.
+npm run cli -- event CREATE_BRANCH
+npm run cli -- event create_ticket
+npm run cli -- event <releaseId> CREATE_BRANCH \
   --payload '{"branches":{"web":"release/1.0.0","api":"release/1.0.0"}}'
-npm run cli -- event <releaseId> TICKET_CREATED --by sam --payload '{"ticketId":"PCM-123"}'
-# ^ auto-advances to QA_APPROVAL_PENDING
-npm run cli -- event <releaseId> QA_APPROVED --by qa-lead --payload '{"approvedBy":"qa-lead"}'
+# ^ cuts each release branch, then commits/pushes the version bump in app/package.json
+#   (or package.json) onto that branch; opens the release PR; records the PR URL;
+#   auto-advances through ticket create to QA_APPROVAL_PENDING (waits there for QA)
+npm run cli -- event CREATE_TICKET
+# ^ only needed if a ticket already exists in Jira but the release is still TICKET_CREATE_PENDING
+#   (posts a Slack QA request if RELEASE_OPERATOR_SLACK_BOT_TOKEN + CHANNEL are set)
+npm run watch:github
+npm run cli -- github watch --status
+# ^ prints running pid / startedAt if a watcher is already up; starting a second one exits
+npm run cli -- slack ingest-approvals <releaseId>
+# ^ one-shot read of the same thread
+npm run cli -- event APPROVE_QA --payload '{"approvedBy":"qa-lead"}'
+# ^ still valid if you are not ingesting from Slack
 # ^ auto-advances to CAB_APPROVAL_PENDING
-npm run cli -- event <releaseId> CAB_APPROVED --by cab-lead --payload '{"approvedBy":"cab-lead"}'
-npm run cli -- event <releaseId> CI_STATUS_REPORTED --by ci-bot --payload '{"status":"green"}'
-npm run cli -- event <releaseId> READY_CHECK_PASSED --by sam
+npm run cli -- event APPROVE_CAB --payload '{"approvedBy":"cab-lead"}'
+npm run cli -- event CHANGE_APPLIED
+# ^ skips deploy/sanity; auto-opens the backmerge PR (target → source, e.g. main → develop)
 # ^ auto-advances to DEPLOYING
 # ...
 
-# See which of the 12 steps a release is on right now
+# See which of the 13 steps a release is on right now
 npm run cli -- status <releaseId>
 
 # Inspect state and full history
 npm run cli -- show <releaseId>
 npm run cli -- history <releaseId>
 npm run cli -- list
+npm run cli -- list --status DRAFT
+npm run cli -- list --status DRAFT,CANCELLED
+npm run cli -- cleanup --status CANCELLED
 ```
 
 ## Extending
 
-- **Add a real integration**: edit the corresponding function in `src/actions.ts`
-  (e.g. `sendQaApprovalMessage`) to call Slack/Jira instead of logging — see `GithubProvider`
-  in `src/github/` for the pattern already used for GitHub.
+- **Add a real integration**: add a provider (see `src/slack/` or `src/github/`) and wire it
+  through `ActionDeps` in `src/actions.ts`. Keep tokens in env, never in committed files.
 - **Add a new guard**: add a function in `src/guards.ts` and register it in the
   `GUARDS` map under `"<FROM_STATE>:<EVENT_TYPE>"`.
 - **Add a new state/event**: extend the union types in `src/types.ts`, add the legal
