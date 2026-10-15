@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { netlifyProjectsForRepo, netlifyRepoKey } from "../src/netlify/repoProjects.js";
+import { netlifyProjectsForRepo, netlifyRepoKey, netlifySitesForRepos } from "../src/netlify/repoProjects.js";
 
 describe("netlifyProjectsForRepo", () => {
   it("maps landings, blog, quiz, and experiences to US + MX custom domains", () => {
@@ -18,5 +18,12 @@ describe("netlifyProjectsForRepo", () => {
 
   it("returns undefined for unmapped repos", () => {
     expect(netlifyProjectsForRepo("web")).toBeUndefined();
+  });
+
+  it("flattens US and MX sites for a mapped repo", () => {
+    expect(netlifySitesForRepos(["landings-microfrontend"]).map((s) => s.site)).toEqual([
+      "landings.ipsy.com",
+      "landings.ipsy.mx",
+    ]);
   });
 });

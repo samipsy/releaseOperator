@@ -53,7 +53,7 @@ describe("Slack actions wired via ReleaseEngine", () => {
     const slack = makeFakeSlack();
     const engine = new ReleaseEngine(new ReleaseStore(openDb(":memory:")), {
       slack,
-      slackChannel: "C123",
+      slackChannelPcmApproval: "C123",
     });
     const workflow = new WorkflowExecutor(engine, loadWorkflowConfig("config/pipeline.yaml"));
     const release = engine.createRelease({

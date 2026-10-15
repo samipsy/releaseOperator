@@ -47,6 +47,14 @@ export async function loadReleasePrTemplate(
     if (text !== undefined) return { path: picked.path, text };
   }
 
+  return loadDefaultPrTemplate(github, input);
+}
+
+/** GitHub's default PR template paths (not release-specific). Used for pre-prod sync PRs. */
+export async function loadDefaultPrTemplate(
+  github: GithubProvider,
+  input: { owner: string; repo: string; ref: string }
+): Promise<LoadedPrTemplate | undefined> {
   for (const path of DEFAULT_PR_TEMPLATE_PATHS) {
     const text = await github.readFile({
       owner: input.owner,
@@ -57,6 +65,22 @@ export async function loadReleasePrTemplate(
     if (text !== undefined) return { path, text };
   }
   return undefined;
+}
+
+/** Fill common placeholders; if no template, return the provided fallback body. */
+export function fillPrTemplateBody(options: {
+  template?: string;
+  fallback: string;
+  vars?: Record<string, string>;
+}): string {
+  let body = options.template?.trim() ?? "";
+  if (body.length === 0) return options.fallback;
+  const vars = options.vars ?? {};
+  for (const [key, value] of Object.entries(vars)) {
+    body = body.replaceAll(`{{${key}}}`, value);
+    body = body.replaceAll(`{{ ${key} }}`, value);
+  }
+  return body;
 }
 
 export function fillReleasePrBody(options: {

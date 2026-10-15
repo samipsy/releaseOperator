@@ -51,6 +51,25 @@ describe("NetlifyRestProvider.latestMainDeploy", () => {
     expect(headers.headers.Authorization).toBe("Bearer nfp_test");
   });
 
+  it("triggerBranchBuild POSTs /sites/{id}/builds with branch as a query param", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "bld-9", deploy_id: "dep-9", sha: "abc123" }),
+    });
+    const provider = new NetlifyRestProvider({ token: "nfp_test", fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const build = await provider.triggerBranchBuild("landings.ipsy.com", "develop");
+
+    expect(build).toEqual({ id: "bld-9", deployId: "dep-9", sha: "abc123" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const url = String(fetchImpl.mock.calls[0]?.[0]);
+    expect(url).toContain("/sites/landings.ipsy.com/builds");
+    expect(url).toContain("branch=develop");
+    const init = fetchImpl.mock.calls[0]?.[1] as { method: string };
+    expect(init.method).toBe("POST");
+  });
+
   it("turns a project admin_url into a deploy permalink", async () => {
     expect(
       netlifyDeployPermalink("6abcb374a0bdad0009445252", "https://app.netlify.com/projects/landings-ipsy")
@@ -78,6 +97,7 @@ describe("resolvePcmRollbackPlan", () => {
         return { id: "us", adminUrl: "https://app.netlify.com/projects/quiz-ipsy/deploys/us" };
       }),
       latestDeployForBranch: vi.fn(),
+      triggerBranchBuild: vi.fn(),
     };
 
     const plan = await resolvePcmRollbackPlan(releaseFor("quiz-microfrontend"), netlify);
@@ -101,6 +121,7 @@ describe("resolvePcmRollbackPlan", () => {
         branch: "main",
       })),
       latestDeployForBranch: vi.fn(),
+      triggerBranchBuild: vi.fn(),
     };
     const result = await lookupNetlifyDeploysForRepo("landings", netlify);
     expect(result.sites.map((s) => s.site)).toEqual(["landings.ipsy.com", "landings.ipsy.mx"]);
@@ -111,6 +132,7 @@ describe("resolvePcmRollbackPlan", () => {
     const netlify: NetlifyProvider = {
       latestMainDeploy: vi.fn().mockRejectedValue(new Error("timeout")),
       latestDeployForBranch: vi.fn(),
+      triggerBranchBuild: vi.fn(),
     };
     const plan = await resolvePcmRollbackPlan(releaseFor("blog"), netlify);
     expect(plan).toContain("US: https://blog.ipsy.com");

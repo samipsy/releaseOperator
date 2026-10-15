@@ -20,7 +20,7 @@ export async function resolveGithubPrApprovalEvent(options: {
       replies: [],
     };
   }
-  const listReviews = github.listPullRequestReviews;
+  const listReviews = github.listPullRequestReviews?.bind(github);
   if (!listReviews) {
     return {
       status: "noop",
@@ -59,14 +59,25 @@ export async function resolveGithubPrApprovalEvent(options: {
         },
       };
     }
-    if (verdict.kind === "none") {
-      return {
-        status: "noop",
-        reason: `No GitHub Approve yet on ${ref.owner}/${ref.repo}#${ref.number}`,
-        replies: [],
-      };
+    if (verdict.kind === "approve") {
+      approvedBy = verdict.userLogin;
+      continue;
     }
-    approvedBy = verdict.userLogin;
+    // Manual merge without an Approve review — still advance so merge action can pick up the SHA.
+    const snapshot = await github.getPullRequest({
+      owner: ref.owner,
+      repo: ref.repo,
+      pullNumber: ref.number,
+    });
+    if (snapshot.merged) {
+      approvedBy = approvedBy ?? actor;
+      continue;
+    }
+    return {
+      status: "noop",
+      reason: `No GitHub Approve yet on ${ref.owner}/${ref.repo}#${ref.number} (Review changes → Approve)`,
+      replies: [],
+    };
   }
 
   return {
@@ -75,7 +86,7 @@ export async function resolveGithubPrApprovalEvent(options: {
     event: {
       type: "PREPROD_APPROVED",
       actor,
-      payload: { approvedBy: approvedBy ?? actor, notes: "GitHub PR approved" },
+      payload: { approvedBy: approvedBy ?? actor },
     },
   };
 }

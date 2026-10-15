@@ -454,6 +454,7 @@ describe("tickGithubPrApprovalWatch", () => {
   it("records idle when there is no GitHub Approve yet", async () => {
     const github = {
       listPullRequestReviews: vi.fn().mockResolvedValue([]),
+      getPullRequest: vi.fn().mockResolvedValue({ number: 88, merged: false, raw: "{}" }),
     };
     const advance = vi.fn();
     const tick = await tickGithubPrApprovalWatch({
@@ -465,6 +466,25 @@ describe("tickGithubPrApprovalWatch", () => {
     expect(tick.applied).toEqual([]);
     expect(tick.idle[0]?.reason).toMatch(/No GitHub Approve/);
     expect(advance).not.toHaveBeenCalled();
+  });
+
+  it("advances when the PR is already merged without an Approve review", async () => {
+    const github = {
+      listPullRequestReviews: vi.fn().mockResolvedValue([]),
+      getPullRequest: vi.fn().mockResolvedValue({ number: 88, merged: true, raw: "{}" }),
+    };
+    const advance = vi.fn().mockResolvedValue({
+      release: { ...preprodPending, state: "PREPROD_MERGING" },
+      fired: [{ event: "PREPROD_MERGE_REQUESTED", resultState: "PREPROD_MERGING" }],
+    });
+    const tick = await tickGithubPrApprovalWatch({
+      releases: [preprodPending],
+      github,
+      actor: "cli",
+      advance,
+    });
+    expect(tick.applied[0]?.eventType).toBe("PREPROD_APPROVED");
+    expect(advance).toHaveBeenCalled();
   });
 
   it("stops after applying a targeted release id", async () => {

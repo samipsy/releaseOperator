@@ -202,7 +202,21 @@ function applyEventEffects(release: Release, event: ReleaseEvent): void {
       break;
     }
     case "PREPROD_DEPLOY_SUCCEEDED": {
-      release.deployment = { ...release.deployment, status: "success", completedAt: new Date() };
+      const deployIds = typeof payload.deployIds === "string" ? payload.deployIds.trim() : "";
+      const notes = typeof payload.notes === "string" ? payload.notes.trim() : "";
+      release.deployment = {
+        ...release.deployment,
+        status: "success",
+        completedAt: new Date(),
+        ...(deployIds ? { deploymentId: deployIds } : {}),
+      };
+      if (notes) {
+        release.approvals.preprod = {
+          ...release.approvals.preprod,
+          status: release.approvals.preprod?.status ?? "approved",
+          notes,
+        };
+      }
       break;
     }
     case "PREPROD_DEPLOY_FAILED": {

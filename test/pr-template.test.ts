@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyReleaseTicketToPrBody,
+  fillPrTemplateBody,
   fillReleasePrBody,
+  loadDefaultPrTemplate,
   loadReleasePrTemplate,
   pickReleaseTemplateFile,
 } from "../src/github/prTemplate.js";
@@ -123,5 +125,48 @@ describe("loadReleasePrTemplate", () => {
       path: ".github/PULL_REQUEST_TEMPLATE/release.md",
       text: "## Release {{version}}",
     });
+  });
+});
+
+describe("loadDefaultPrTemplate", () => {
+  it("loads .github/PULL_REQUEST_TEMPLATE.md from the base ref", async () => {
+    const github: GithubProvider = {
+      createReleaseBranch: vi.fn(),
+      createBackmergePullRequest: vi.fn(),
+      getPullRequest: vi.fn(),
+      updatePullRequest: vi.fn(),
+      tagReleaseBranch: vi.fn(),
+      listCommitsAhead: vi.fn(),
+      latestTagName: vi.fn(),
+      listDirectory: vi.fn(),
+      readFile: vi.fn().mockImplementation(async (input: { path: string }) => {
+        if (input.path === ".github/PULL_REQUEST_TEMPLATE.md") return "## Checklist\n\n- [ ] Done";
+        return undefined;
+      }),
+      readFileMeta: vi.fn(),
+      commitFile: vi.fn(),
+      listPullRequestsForCommit: vi.fn().mockResolvedValue([]),
+    };
+    const loaded = await loadDefaultPrTemplate(github, { owner: "ipsy", repo: "blog", ref: "pre-prod-1" });
+    expect(loaded).toEqual({
+      path: ".github/PULL_REQUEST_TEMPLATE.md",
+      text: "## Checklist\n\n- [ ] Done",
+    });
+  });
+});
+
+describe("fillPrTemplateBody", () => {
+  it("uses the template when present and substitutes placeholders", () => {
+    expect(
+      fillPrTemplateBody({
+        template: "## Sync {{head}} -> {{base}}\n\n- [ ] Review",
+        fallback: "fallback",
+        vars: { head: "develop", base: "pre-prod-1" },
+      })
+    ).toBe("## Sync develop -> pre-prod-1\n\n- [ ] Review");
+  });
+
+  it("falls back when no template is present", () => {
+    expect(fillPrTemplateBody({ fallback: "Pre-prod sync for `blog`." })).toBe("Pre-prod sync for `blog`.");
   });
 });

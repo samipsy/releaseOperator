@@ -38,6 +38,10 @@ export interface GithubPullRequestSnapshot {
   url?: string;
   title?: string;
   body?: string;
+  /** True when the PR is already merged on GitHub. */
+  merged?: boolean;
+  /** Merge commit SHA when the PR is merged. */
+  mergeCommitSha?: string;
   raw: string;
 }
 

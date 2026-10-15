@@ -54,7 +54,8 @@ export { classifyPullRequestReviews } from "./github/prReviews.js";
 export { resolveGithubPrApprovalEvent } from "./github/ingestPrApprovals.js";
 export { connectGithubMcp, type ConnectGithubMcpOptions, type GithubMcpConnection } from "./github/mcpClient.js";
 export { GithubMcpProvider, type GithubMcpProviderOptions } from "./github/githubMcpProvider.js";
-export { fillReleasePrBody, applyReleaseTicketToPrBody } from "./github/prTemplate.js";
+export { fillReleasePrBody, fillPrTemplateBody, applyReleaseTicketToPrBody } from "./github/prTemplate.js";
+export { loadReleasePrTemplate, loadDefaultPrTemplate } from "./github/prTemplate.js";
 export { parseGithubPullRequestUrl, githubPullRequestUrlFromCreate } from "./github/prUrl.js";
 export {
   changeReasonOneLiner,
@@ -63,7 +64,12 @@ export {
   displaySystemName,
 } from "./jira/pcmChangeFields.js";
 export { formatReleaseNoteLine, formatReleaseNoteRow, formatReleaseNotesBlock, type ReleaseChange } from "./releaseNotes.js";
-export { netlifyProjectsForRepo, netlifyProjectsForRepos, netlifyRepoKey } from "./netlify/repoProjects.js";
+export {
+  netlifyProjectsForRepo,
+  netlifyProjectsForRepos,
+  netlifySitesForRepos,
+  netlifyRepoKey,
+} from "./netlify/repoProjects.js";
 export { PREPROD_SOURCE_BRANCH, PREPROD_TARGET_BRANCH } from "./preprod/constants.js";
 export { syncOrgRepoCatalog } from "./github/syncRepos.js";
 export { parseReposSpec, resolveReposAgainstCatalog } from "./github/resolveRepos.js";
@@ -84,7 +90,7 @@ export { connectConfiguredJira, type ConfiguredJira } from "./jira/connect.js";
 export { runJiraLogin, runJiraLogout } from "./jira/login.js";
 export { SlackRestProvider, slackMessagePermalink, type SlackRestProviderOptions } from "./slack/slackRestProvider.js";
 export { NetlifyRestProvider, type NetlifyRestProviderOptions } from "./netlify/netlifyRestProvider.js";
-export type { NetlifyProvider, NetlifyDeploy } from "./netlify/types.js";
+export type { NetlifyProvider, NetlifyDeploy, NetlifyBuild } from "./netlify/types.js";
 export type {
   SlackProvider,
   SlackPostMessageInput,

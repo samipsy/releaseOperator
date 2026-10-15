@@ -4,7 +4,7 @@ import type { IntelligenceProvider } from "./intelligence/types.js";
 import type { JiraProvider } from "./jira/types.js";
 import type { SlackProvider } from "./slack/types.js";
 import { collectReleaseTicketScope } from "./jira/releaseScope.js";
-import { fillReleasePrBody, loadReleasePrTemplate, applyReleaseTicketToPrBody } from "./github/prTemplate.js";
+import { fillReleasePrBody, loadReleasePrTemplate, loadDefaultPrTemplate, fillPrTemplateBody, applyReleaseTicketToPrBody } from "./github/prTemplate.js";
 import { githubPullRequestUrlFromCreate, parseGithubPullRequestUrl } from "./github/prUrl.js";
 import { releasePrBase, backmergePrHead, backmergePrBase } from "./github/releaseBranches.js";
 import { commitPackageJsonBump } from "./github/bumpPackageJson.js";
@@ -16,11 +16,10 @@ import {
   pcmLinkedTicketKeys,
   PCM_ISSUE_LINK_TYPE,
 } from "./jira/pcmChangeFields.js";
-import { netlifyProjectsForRepos } from "./netlify/repoProjects.js";
-import { watchBranchDeploys } from "./netlify/watchDeploys.js";
+import { netlifySitesForRepos } from "./netlify/repoProjects.js";
 import { resolvePcmRollbackPlan } from "./netlify/rollbackPlan.js";
-import type { NetlifyProvider } from "./netlify/types.js";
-import { PREPROD_SOURCE_BRANCH, PREPROD_TARGET_BRANCH } from "./preprod/constants.js";
+import type { NetlifyBuild, NetlifyProvider } from "./netlify/types.js";
+import { PREPROD_SOURCE_BRANCH, PREPROD_TARGET_BRANCH, preprodSyncPrTitle } from "./preprod/constants.js";
 
 /**
  * Stub integrations. Each logs what it *would* do. Swap the body for a real
@@ -57,9 +56,11 @@ export interface ActionDeps {
   /** Extra Jira fields (customfield_*, labels, …). */
   jiraExtraFields?: Record<string, unknown>;
   slack?: SlackProvider;
-  /** Channel id (`C…`) or `#name`. Required for real Slack posts. */
-  slackChannel?: string;
-  /** Looks up live Netlify deploys for PCM rollback when `NETLIFY_AUTH_TOKEN` is set. */
+  /** Channel for release / pre-prod PR review notices (`RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW`). */
+  slackChannelPrReview?: string;
+  /** Channel for PCM QA/CAB approval requests (`RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL`). */
+  slackChannelPcmApproval?: string;
+  /** Netlify REST: PCM rollback URLs, pre-prod develop HEAD builds, deploy watch. */
   netlify?: NetlifyProvider;
   /** Overrides for pre-prod Netlify polling (tests). */
   netlifyPoll?: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> };
@@ -85,30 +86,52 @@ function storedApprovalThread(release: Release): { channel: string; ts: string }
   return undefined;
 }
 
+type SlackChannelKind = "pr_review" | "pcm_approval";
+
+function resolveSlackChannel(deps: ActionDeps, kind: SlackChannelKind): string | undefined {
+  if (kind === "pr_review") return deps.slackChannelPrReview?.trim();
+  return deps.slackChannelPcmApproval?.trim();
+}
+
+function slackChannelEnvHint(kind: SlackChannelKind): string {
+  return kind === "pr_review"
+    ? "RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW is unset"
+    : "RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL is unset";
+}
+
 async function postSlack(
   deps: ActionDeps,
   release: Release,
   label: string,
   text: string,
-  threadTs?: string
+  options?: { channelKind?: SlackChannelKind; threadTs?: string; channel?: string }
 ): Promise<{ channel: string; ts: string; url?: string } | undefined> {
   if (!deps.slack) {
     log(`${label} (skipped: Slack integration not configured)`, release);
     return undefined;
   }
   const thread = storedApprovalThread(release);
-  const channel = (threadTs ? thread?.channel : undefined) ?? deps.slackChannel?.trim();
+  const channel =
+    options?.channel?.trim() ||
+    (options?.threadTs ? thread?.channel : undefined) ||
+    (options?.channelKind ? resolveSlackChannel(deps, options.channelKind) : undefined);
   if (!channel) {
-    console.error(`[action:error] ${label}: RELEASE_OPERATOR_SLACK_CHANNEL is unset`);
+    const hint = options?.channelKind ? slackChannelEnvHint(options.channelKind) : "Slack channel is unset";
+    console.error(`[action:error] ${label}: ${hint}`);
     return undefined;
   }
   try {
     const result = await deps.slack.postMessage({
       channel,
       text,
-      ...(threadTs ? { threadTs } : {}),
+      ...(options?.threadTs ? { threadTs: options.threadTs } : {}),
     });
-    log(label, release, { channel: result.channel, ts: result.ts, url: result.url, threadTs });
+    log(label, release, {
+      channel: result.channel,
+      ts: result.ts,
+      url: result.url,
+      threadTs: options?.threadTs,
+    });
     console.error(`[action] Slack ${label}: ${result.url ?? `${result.channel} ${result.ts}`}`);
     return result;
   } catch (err) {
@@ -128,17 +151,23 @@ async function replyInApprovalThread(
     log(`${label} (skipped: no Slack approval thread stored)`, release);
     return;
   }
-  await postSlack(deps, release, label, text, thread.ts);
+  await postSlack(deps, release, label, text, { threadTs: thread.ts, channel: thread.channel });
 }
 
-function notifySlack(deps: ActionDeps, label: string, text: (release: Release) => string): Action {
+function notifySlack(
+  deps: ActionDeps,
+  label: string,
+  text: (release: Release) => string,
+  channelKind: SlackChannelKind = "pcm_approval"
+): Action {
   return async (release: Release) => {
     const thread = storedApprovalThread(release);
     if (thread) {
       await replyInApprovalThread(deps, release, label, text(release));
       return;
     }
-    await postSlack(deps, release, label, text(release));
+    const kind = release.environment === "preprod" ? "pr_review" : channelKind;
+    await postSlack(deps, release, label, text(release), { channelKind: kind });
   };
 }
 
@@ -324,23 +353,24 @@ function requestApproval(deps: ActionDeps, kind: "qa" | "cab" | "preprod"): Acti
         ? "slack.sendQaApprovalMessage"
         : kind === "cab"
           ? "slack.sendCabApprovalMessage"
-          : "slack.sendPreprodApprovalMessage";
-    const who = kind === "qa" ? "QA" : kind === "cab" ? "CAB" : "pre-prod sync";
-    const preprodPrUrls = release.repos
+          : "slack.sendPreprodPrReviewMessage";
+    const prUrls = release.repos
       .map((repo) => repo.releasePrUrl?.trim())
       .filter((url): url is string => Boolean(url));
     const how =
       kind === "preprod"
         ? [
             "Hey team, Please review this PR to sync pre-prod-1 branch from develop: " +
-              `${preprodPrUrls.length > 0 ? preprodPrUrls.join(" ") : "(PR URL missing)"}. Thanks.`,
+              `${prUrls.length > 0 ? prUrls.join(" ") : "(PR URL missing)"}.`,
+            "On GitHub: Review changes → Approve. (Slack replies here are notice-only; the watcher merges after Approve.)",
           ]
         : [
-            `${releaseSlackSummary(release)} needs ${who} approval.`,
+            `${releaseSlackSummary(release)} needs ${kind === "qa" ? "QA" : "CAB"} approval.`,
             "Reply *approve* / *approved* / *approval* or ✅ in this thread.",
             `Then: npm run cli -- slack ingest-approvals ${release.id}`,
           ];
-    const posted = await postSlack(deps, release, label, how.join("\n"));
+    const channelKind: SlackChannelKind = kind === "preprod" ? "pr_review" : "pcm_approval";
+    const posted = await postSlack(deps, release, label, how.join("\n"), { channelKind });
     if (!posted) return;
     if (kind === "qa") {
       release.approvals.qa = {
@@ -364,6 +394,26 @@ function requestApproval(deps: ActionDeps, kind: "qa" | "cab" | "preprod"): Acti
         slackTs: posted.ts,
       };
     }
+  };
+}
+
+/** Notify the PR-review channel when release PRs are open, before PCM QA/CAB. */
+function notifyReleasePrReview(deps: ActionDeps): Action {
+  return async (release: Release) => {
+    const prUrls = release.repos
+      .map((repo) => repo.releasePrUrl?.trim())
+      .filter((url): url is string => Boolean(url));
+    if (prUrls.length === 0) {
+      log("slack.notifyReleasePrReview (skipped: no release PR URLs)", release);
+      return;
+    }
+    await postSlack(
+      deps,
+      release,
+      "slack.notifyReleasePrReview",
+      `Hey team, Please review this release PR for ${release.version}: ${prUrls.join(" ")}. Thanks.`,
+      { channelKind: "pr_review" }
+    );
   };
 }
 
@@ -738,13 +788,41 @@ function createPreprodPrAction(deps: ActionDeps): Action {
       const head = repo.sourceBranch || PREPROD_SOURCE_BRANCH;
       const base = repo.targetBranch || PREPROD_TARGET_BRANCH;
       try {
+        let template: string | undefined;
+        let templatePath: string | undefined;
+        try {
+          // GitHub applies the PR template from the base branch.
+          const loaded = await loadDefaultPrTemplate(deps.github, {
+            owner,
+            repo: githubRepo,
+            ref: base,
+          });
+          template = loaded?.text;
+          templatePath = loaded?.path;
+        } catch (err) {
+          console.error(
+            `[action:error] github.preprodPrTemplate (${owner}/${githubRepo}):`,
+            (err as Error).message
+          );
+        }
+        const body = fillPrTemplateBody({
+          template,
+          fallback: `Pre-prod sync for \`${githubRepo}\`.`,
+          vars: {
+            repo: githubRepo,
+            head,
+            base,
+            sourceBranch: head,
+            targetBranch: base,
+          },
+        });
         const result = await deps.github.createBackmergePullRequest({
           owner,
           repo: githubRepo,
-          title: `Sync ${head} → ${base}`,
+          title: preprodSyncPrTitle(head, base),
           head,
           base,
-          body: `Pre-prod sync for \`${githubRepo}\`.\n\nMerge ${head} into ${base} after Slack approval.`,
+          body,
         });
         const prUrl = githubPullRequestUrlFromCreate({
           owner,
@@ -754,8 +832,17 @@ function createPreprodPrAction(deps: ActionDeps): Action {
           raw: result.raw,
         });
         if (prUrl) prUrls[repo.name] = prUrl;
-        log("github.createPreprodPr", release, { repo: `${owner}/${githubRepo}`, url: prUrl ?? result.raw, head, base });
-        console.error(`[action] Pre-prod PR for ${owner}/${githubRepo}: ${prUrl ?? result.raw} (${head} → ${base})`);
+        log("github.createPreprodPr", release, {
+          repo: `${owner}/${githubRepo}`,
+          url: prUrl ?? result.raw,
+          head,
+          base,
+          template: templatePath ?? "(none)",
+        });
+        console.error(
+          `[action] Pre-prod PR for ${owner}/${githubRepo}: ${prUrl ?? result.raw} (${head} → ${base})` +
+            (templatePath ? ` (template ${templatePath})` : " (no PR template found in repo)")
+        );
       } catch (err) {
         logError(`github.createPreprodPr (${owner}/${githubRepo})`, release, err);
       }
@@ -775,7 +862,8 @@ function mergePreprodPrAction(deps: ActionDeps): Action {
       log("github.mergePreprodPr (skipped: GitHub merge not configured)", release);
       return;
     }
-    const merge = deps.github.mergePullRequest;
+    const merge = deps.github.mergePullRequest.bind(deps.github);
+    const getPr = deps.github.getPullRequest.bind(deps.github);
     const mergedUrls: string[] = [];
     for (const repo of release.repos) {
       const parsed = repo.releasePrUrl ? parseGithubPullRequestUrl(repo.releasePrUrl) : undefined;
@@ -784,16 +872,46 @@ function mergePreprodPrAction(deps: ActionDeps): Action {
         continue;
       }
       try {
-        const result = await merge({
-          owner: parsed.owner,
-          repo: parsed.repo,
-          pullNumber: parsed.number,
-        });
-        if (result.merged || result.sha) {
+        let sha: string | undefined;
+        let merged = false;
+
+        // Prefer current PR state: already-merged PRs must not block Slack / Netlify.
+        let existing: Awaited<ReturnType<typeof getPr>> | undefined;
+        try {
+          existing = await getPr({
+            owner: parsed.owner,
+            repo: parsed.repo,
+            pullNumber: parsed.number,
+          });
+        } catch (err) {
+          console.error(
+            `[action:error] github.getPullRequest (${parsed.owner}/${parsed.repo}#${parsed.number}):`,
+            (err as Error).message
+          );
+        }
+        if (existing?.merged) {
+          merged = true;
+          sha = existing.mergeCommitSha?.trim() || `merged-${parsed.number}`;
+          console.error(
+            `[action] PR ${parsed.owner}/${parsed.repo}#${parsed.number} already merged` +
+              (existing.mergeCommitSha ? ` (sha ${existing.mergeCommitSha})` : "") +
+              "; continuing"
+          );
+        } else {
+          const result = await merge({
+            owner: parsed.owner,
+            repo: parsed.repo,
+            pullNumber: parsed.number,
+          });
+          merged = result.merged || Boolean(result.sha);
+          sha = result.sha;
+        }
+
+        if (merged || sha) {
           release.deployment = {
             ...release.deployment,
             status: "pending",
-            deploymentId: result.sha ?? String(parsed.number),
+            deploymentId: sha ?? String(parsed.number),
             startedAt: new Date(),
           };
           if (repo.releasePrUrl) mergedUrls.push(repo.releasePrUrl);
@@ -801,15 +919,17 @@ function mergePreprodPrAction(deps: ActionDeps): Action {
         log("github.mergePreprodPr", release, {
           repo: `${parsed.owner}/${parsed.repo}`,
           number: parsed.number,
-          sha: result.sha,
-          merged: result.merged,
+          sha,
+          merged,
         });
         console.error(
-          `[action] Merged ${parsed.owner}/${parsed.repo}#${parsed.number}` +
-            (result.sha ? ` sha ${result.sha}` : "")
+          `[action] Merged ${parsed.owner}/${parsed.repo}#${parsed.number}` + (sha ? ` sha ${sha}` : "")
         );
       } catch (err) {
         logError(`github.mergePreprodPr (${parsed.owner}/${parsed.repo}#${parsed.number})`, release, err);
+        console.error(
+          `  -> Retry with: npm run cli -- preprod event RETRY_PREPROD_MERGE`
+        );
       }
     }
     if (mergedUrls.length > 0) {
@@ -817,80 +937,75 @@ function mergePreprodPrAction(deps: ActionDeps): Action {
         deps,
         release,
         "slack.notifyPreprodMerged",
-        [
-          `${releaseSlackSummary(release)}: PR is now merged into pre-prod-1. Build is progressing.`,
-          ...mergedUrls,
-        ].join("\n")
+        "PR is now merged into pre-prod-1. Build is progressing."
+      );
+    } else {
+      console.error(
+        `[action:error] github.mergePreprodPr: no PR was merged for ${release.id}; staying in PREPROD_MERGING. ` +
+          `Retry: npm run cli -- preprod event RETRY_PREPROD_MERGE`
       );
     }
   };
 }
 
+function rememberSourceBranchBuild(release: Release, site: string, build: NetlifyBuild): void {
+  release.deployment = {
+    ...release.deployment,
+    status: release.deployment?.status ?? "running",
+    sourceBranchBuilds: {
+      ...release.deployment?.sourceBranchBuilds,
+      [site]: {
+        id: build.id,
+        ...(build.deployId ? { deployId: build.deployId } : {}),
+        ...(build.sha ? { sha: build.sha } : {}),
+      },
+    },
+  };
+}
+
 function watchPreprodNetlifyAction(deps: ActionDeps): Action {
   return async (release: Release) => {
-    const branch = release.repos[0]?.targetBranch || PREPROD_TARGET_BRANCH;
-    const sites = netlifyProjectsForRepos(release.repos.map((repo) => repo.name)).flatMap((pair) => [
-      { region: pair.us.region, site: pair.us.site },
-      { region: pair.mx.region, site: pair.mx.site },
-    ]);
+    const sourceBranch = release.repos[0]?.sourceBranch || PREPROD_SOURCE_BRANCH;
+    const targetBranch = release.repos[0]?.targetBranch || PREPROD_TARGET_BRANCH;
+    const sites = netlifySitesForRepos(release.repos.map((repo) => repo.name));
+    // Do not block the CLI / merge path on Netlify. `npm run watch:github` polls deploys.
     if (sites.length === 0) {
-      console.error(`[action] No Netlify US/MX mapping for this repo; marking pre-prod deploy complete.`);
-      release.deployment = { ...release.deployment, status: "success", completedAt: new Date() };
-      await replyInApprovalThread(
-        deps,
-        release,
-        "slack.notifyPreprodBuildSucceeded",
-        `${releaseSlackSummary(release)}: build was successful (no Netlify mapping for this repo).`
+      console.error(
+        `[action] No Netlify US/MX mapping for this repo; watch:github will mark deploy complete.`
       );
-      return;
+    } else {
+      if (deps.netlify) {
+        for (const row of sites) {
+          const existing = release.deployment?.sourceBranchBuilds?.[row.site];
+          if (existing?.id) {
+            console.error(
+              `[action] Skipping Netlify ${sourceBranch} HEAD build for ${row.region} (${row.site}); ` +
+                `already triggered as build=${existing.id}` +
+                (existing.deployId ? ` deploy=${existing.deployId}` : "")
+            );
+            continue;
+          }
+          try {
+            const build = await deps.netlify.triggerBranchBuild(row.site, sourceBranch);
+            rememberSourceBranchBuild(release, row.site, build);
+            console.error(
+              `[action] Triggered Netlify ${sourceBranch} HEAD build for ${row.region} (${row.site})` +
+                ` build=${build.id}` +
+                (build.deployId ? ` deploy=${build.deployId}` : "") +
+                (build.sha ? ` sha=${build.sha}` : "")
+            );
+          } catch (err) {
+            logError(`netlify.triggerBranchBuild (${row.site} ${sourceBranch})`, release, err);
+          }
+        }
+      }
+      console.error(
+        `[action] Waiting for Netlify ${targetBranch} deploys (${sites.map((s) => s.site).join(", ")}) via watch:github`
+      );
     }
     if (!deps.netlify) {
-      console.error(`[action:error] Netlify not configured (NETLIFY_AUTH_TOKEN). Cannot watch ${branch} deploys.`);
-      console.error(`  -> run: release-operator event ${release.id} PREPROD_DEPLOY_FAILED`);
-      return;
+      console.error(`[action] NETLIFY_AUTH_TOKEN unset — watch:github cannot confirm deploys until it is set.`);
     }
-    const startedAt = release.deployment?.startedAt ?? new Date();
-    console.error(`[action] Watching Netlify ${branch} deploys for ${sites.map((s) => s.site).join(", ")}`);
-    const result = await watchBranchDeploys({
-      sites,
-      branch,
-      netlify: deps.netlify,
-      startedAt,
-      timeoutMs: deps.netlifyPoll?.timeoutMs,
-      intervalMs: deps.netlifyPoll?.intervalMs,
-      sleep: deps.netlifyPoll?.sleep,
-    });
-    if (result.ok) {
-      release.deployment = {
-        ...release.deployment,
-        status: "success",
-        completedAt: new Date(),
-        deploymentId: result.deploys.map((d) => d.deploy.id).join(","),
-      };
-      for (const row of result.deploys) {
-        console.error(`[action] ${row.region} ${row.site}: ${row.deploy.adminUrl}`);
-      }
-      await replyInApprovalThread(
-        deps,
-        release,
-        "slack.notifyPreprodBuildSucceeded",
-        [
-          `${releaseSlackSummary(release)}: build was successful.`,
-          ...result.deploys.map(
-            (row) => `${row.region} ${row.site}: ${row.deploy.adminUrl ?? row.deploy.id}`
-          ),
-        ].join("\n")
-      );
-      return;
-    }
-    console.error(`[action:error] Netlify watch failed: ${result.reason}`);
-    console.error(`  -> run: release-operator event ${release.id} PREPROD_DEPLOY_FAILED`);
-    await replyInApprovalThread(
-      deps,
-      release,
-      "slack.notifyPreprodBuildFailed",
-      `${releaseSlackSummary(release)}: build failed. ${result.reason}`
-    );
   };
 }
 
@@ -902,7 +1017,8 @@ export function buildOnEnterRegistry(deps: ActionDeps = {}): Partial<Record<Rele
     CHANGE_TICKET_CREATED: [updateReleasePrsWithTicketAction(deps)],
     BRANCH_CREATED: [createReleaseBranchesAction(deps)],
     RELEASE_PR_PENDING: [createReleasePrAction(deps)],
-    RELEASE_PR_FAILED: [notifySlack(deps, "slack.notifyReleasePrFailed", (r) => `${releaseSlackSummary(r)}: release PR failed`)],
+    RELEASE_PR_FAILED: [notifySlack(deps, "slack.notifyReleasePrFailed", (r) => `${releaseSlackSummary(r)}: release PR failed`, "pr_review")],
+    RELEASE_PR_OPEN: [notifyReleasePrReview(deps)],
     QA_APPROVAL_PENDING: [requestApproval(deps, "qa")],
     CAB_APPROVAL_PENDING: [requestApproval(deps, "cab")],
     READY_TO_DEPLOY: [notifySlack(deps, "slack.notifyReadyToDeploy", (r) => `${releaseSlackSummary(r)} is ready to deploy`)],
@@ -919,15 +1035,24 @@ export function buildOnEnterRegistry(deps: ActionDeps = {}): Partial<Record<Rele
     TAGGING_FAILED: [notifySlack(deps, "slack.notifyTaggingFailed", (r) => `${releaseSlackSummary(r)}: tagging failed`)],
     TAGGED: [tagRepositoriesOnGithubAction(deps)],
     PREPROD_PR_PENDING: [createPreprodPrAction(deps)],
-    PREPROD_PR_FAILED: [notifySlack(deps, "slack.notifyPreprodPrFailed", (r) => `${releaseSlackSummary(r)}: pre-prod PR failed`)],
+    PREPROD_PR_FAILED: [notifySlack(deps, "slack.notifyPreprodPrFailed", (r) => `${releaseSlackSummary(r)}: pre-prod PR failed`, "pr_review")],
     PREPROD_APPROVAL_PENDING: [requestApproval(deps, "preprod")],
     PREPROD_MERGING: [mergePreprodPrAction(deps)],
-    PREPROD_MERGE_FAILED: [notifySlack(deps, "slack.notifyPreprodMergeFailed", (r) => `${releaseSlackSummary(r)}: pre-prod merge failed`)],
+    PREPROD_MERGE_FAILED: [notifySlack(deps, "slack.notifyPreprodMergeFailed", (r) => `${releaseSlackSummary(r)}: pre-prod merge failed`, "pr_review")],
     PREPROD_DEPLOYING: [watchPreprodNetlifyAction(deps)],
-    PREPROD_DEPLOY_FAILED: [notifySlack(deps, "slack.notifyPreprodDeployFailed", (r) => `${releaseSlackSummary(r)}: pre-prod Netlify deploy failed`)],
+    PREPROD_DEPLOY_FAILED: [notifySlack(deps, "slack.notifyPreprodDeployFailed", (r) => `${releaseSlackSummary(r)}: pre-prod Netlify deploy failed`, "pr_review")],
     COMPLETE: [
       async (release) => {
-        if (release.environment === "preprod") return;
+        if (release.environment === "preprod") {
+          const notes = release.approvals.preprod?.notes?.trim();
+          await replyInApprovalThread(
+            deps,
+            release,
+            "slack.notifyPreprodBuildSucceeded",
+            ["Build was successful.", ...(notes ? [notes] : [])].join("\n")
+          );
+          return;
+        }
         await notifySlack(deps, "slack.notifyComplete", (r) => `${releaseSlackSummary(r)} is complete`)(release);
       },
     ],

@@ -1,4 +1,5 @@
-# Pre-prod sync: develop → pre-prod-1, Slack approve, merge, watch Netlify.
+# Pre-prod sync: develop → pre-prod-1, Slack/GitHub approve, merge,
+# trigger Netlify develop HEAD builds, watch pre-prod-1 deploys.
 # Validated against src/transitions.ts. Prod PCM pipeline stays in pipeline.yaml.
 
 steps:
@@ -26,7 +27,7 @@ steps:
 
   - id: preprod_ask
     step: 2
-    name: Ask Slack for pre-prod merge approval
+    name: Post pre-prod PR to Slack review channel
     fromState: PREPROD_PR_OPEN
     event: PREPROD_APPROVAL_REQUESTED
     resultState: PREPROD_APPROVAL_PENDING
@@ -34,7 +35,7 @@ steps:
 
   - id: preprod_wait
     step: 3
-    name: WAIT for Slack approval
+    name: WAIT for GitHub PR Approve (watch:github)
     fromState: PREPROD_APPROVAL_PENDING
     event: PREPROD_APPROVED
     resultState: PREPROD_APPROVED
@@ -64,7 +65,7 @@ steps:
 
   - id: preprod_watch_kickoff
     step: 5
-    name: "Watch Netlify pre-prod-1 deploys: start"
+    name: "Trigger Netlify develop HEAD builds; watch pre-prod-1: start"
     fromState: PREPROD_MERGED
     event: PREPROD_DEPLOY_WATCH
     resultState: PREPROD_DEPLOYING
@@ -72,11 +73,11 @@ steps:
 
   - id: preprod_watch_result
     step: 5
-    name: "Watch Netlify pre-prod-1 deploys: result"
+    name: WAIT for Netlify pre-prod-1 deploys (watch:github)
     fromState: PREPROD_DEPLOYING
     event: PREPROD_DEPLOY_SUCCEEDED
     resultState: COMPLETE
-    wait: false
+    wait: true
     onFailure:
       event: PREPROD_DEPLOY_FAILED
       resultState: PREPROD_DEPLOY_FAILED

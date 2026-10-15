@@ -68,6 +68,7 @@ async function buildEngineForEvents(): Promise<{
   engine: ReleaseEngine;
   close: () => Promise<void>;
   github?: GithubMcpProvider;
+  netlify?: NetlifyRestProvider;
 }> {
   const db = openDb(DB_PATH);
   const store = new ReleaseStore(db);
@@ -87,7 +88,8 @@ async function buildEngineForEvents(): Promise<{
 
   const jiraCreate = jiraIssueCreateConfigFromEnv();
   const slackToken = process.env.RELEASE_OPERATOR_SLACK_BOT_TOKEN?.trim();
-  const slackChannel = process.env.RELEASE_OPERATOR_SLACK_CHANNEL?.trim();
+  const slackChannelPrReview = process.env.RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW?.trim();
+  const slackChannelPcmApproval = process.env.RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL?.trim();
   const slack = slackToken ? new SlackRestProvider({ token: slackToken }) : undefined;
   const netlifyToken = process.env.NETLIFY_AUTH_TOKEN?.trim();
   const netlify = netlifyToken ? new NetlifyRestProvider({ token: netlifyToken }) : undefined;
@@ -96,7 +98,8 @@ async function buildEngineForEvents(): Promise<{
     jira: jiraConnection?.provider,
     intelligence,
     slack,
-    slackChannel,
+    slackChannelPrReview,
+    slackChannelPcmApproval,
     netlify,
     defaultGithubOrg: process.env.RELEASE_OPERATOR_GITHUB_ORG,
     jiraProjectKey: process.env.RELEASE_OPERATOR_JIRA_PROJECT_KEY,
@@ -104,7 +107,7 @@ async function buildEngineForEvents(): Promise<{
     jiraParentKey: jiraCreate.parentKey,
     jiraExtraFields: Object.keys(jiraCreate.extraFields).length > 0 ? jiraCreate.extraFields : undefined,
   });
-  return { engine, github, close: async () => { for (const close of closers) await close(); } };
+  return { engine, github, netlify, close: async () => { for (const close of closers) await close(); } };
 }
 
 function buildWorkflow(engine: ReleaseEngine, environment: "prod" | "preprod" = "prod"): WorkflowExecutor {
@@ -502,8 +505,8 @@ function printGithubWatchStatus(): void {
 
 github
   .command("watch")
-  .description("Poll GitHub PR reviews for pre-prod sync (~1 min) and merge when approved")
-  .argument("[releaseId]", "optional: only this release; otherwise every pending pre-prod approval")
+  .description("Poll GitHub PR reviews + Netlify pre-prod deploys; merge when approved")
+  .argument("[releaseId]", "optional: only this release; otherwise every pending pre-prod release")
   .option("--interval <seconds>", "seconds between polls", "60")
   .option("--status", "print whether a watcher is already running, then exit")
   .option("--by <actor>", "who is ingesting the GitHub review")
@@ -552,15 +555,19 @@ github
         process.exitCode = 1;
         return;
       }
+      if (!built.netlify) {
+        console.error("Warning: NETLIFY_AUTH_TOKEN unset — PR approve/merge will work, but Netlify deploy watch will idle.");
+      }
       const actor = opts.by ?? defaultActor();
       console.error(
-        `Watching GitHub PR reviews every ${intervalSec}s` +
-          (releaseId ? ` for ${releaseId}` : " for pending pre-prod releases") +
+        `Watching pre-prod (GitHub reviews + Netlify deploys) every ${intervalSec}s` +
+          (releaseId ? ` for ${releaseId}` : "") +
           ` (pid ${process.pid}). Ctrl-C to stop.`
       );
       await runGithubPrApprovalWatch({
         listReleases: () => built.engine.listReleases(),
         github: built.github,
+        netlify: built.netlify,
         actor,
         intervalMs,
         signal: ac.signal,
@@ -578,14 +585,20 @@ github
             for (const hop of applied.fired) {
               console.error(`  auto-advanced: ${hop.event} -> ${hop.resultState}`);
             }
+            if (applied.deployLines) {
+              for (const line of applied.deployLines) console.error(`  ${line}`);
+            }
             printRelease(built.engine.getRelease(applied.releaseId));
           }
           if (tick.applied.length === 0 && tick.errors.length === 0) {
-            console.error(
-              tick.checked === 0
-                ? "No pre-prod releases waiting on GitHub PR approval."
-                : `Waiting on ${tick.checked} GitHub PR review(s).`
-            );
+            if (tick.checked === 0) {
+              console.error("No pre-prod releases waiting on GitHub approval or Netlify deploys.");
+            } else {
+              console.error(`Waiting on ${tick.checked} pre-prod release(s):`);
+              for (const idle of tick.idle) {
+                console.error(`  ${idle.releaseId}: ${idle.reason}`);
+              }
+            }
           }
         },
       });
@@ -888,11 +901,13 @@ slack
       const result = await new SlackRestProvider({ token }).authTest();
       const who = result.user ?? result.userId ?? "(unknown user)";
       const team = result.team ?? "(unknown team)";
-      const channel = process.env.RELEASE_OPERATOR_SLACK_CHANNEL?.trim();
-      console.log(
-        `Reachable. Authenticated as ${who} on ${team}` +
-          (channel ? `. Channel ${channel}` : ". RELEASE_OPERATOR_SLACK_CHANNEL is unset — posts will be skipped.")
-      );
+      const prReview = process.env.RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW?.trim();
+      const pcmApproval = process.env.RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL?.trim();
+      const channels = [
+        prReview ? `PR review ${prReview}` : "PR review channel unset",
+        pcmApproval ? `PCM approval ${pcmApproval}` : "PCM approval channel unset",
+      ].join("; ");
+      console.log(`Reachable. Authenticated as ${who} on ${team}. ${channels}.`);
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

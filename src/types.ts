@@ -202,6 +202,11 @@ export interface Release {
     deploymentId?: string;
     startedAt?: Date;
     completedAt?: Date;
+    /**
+     * Netlify source-branch (`develop`) HEAD builds already accepted this sync, keyed by site.
+     * RETRY_PREPROD_DEPLOY skips sites that already have an entry.
+     */
+    sourceBranchBuilds?: Record<string, { id: string; deployId?: string; sha?: string }>;
   };
 
   sanity?: {

@@ -294,13 +294,17 @@ SlackProvider (interface)
           getUser / authTest        → users.info / auth.test
 ```
 
-Entering `QA_APPROVAL_PENDING` / `CAB_APPROVAL_PENDING` posts to `RELEASE_OPERATOR_SLACK_CHANNEL`
-and stores the thread. Pre-prod also posts a Slack notice, but **approval is GitHub PR reviews**
+Entering `RELEASE_PR_OPEN` posts the release PR(s) to `RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW`.
+`QA_APPROVAL_PENDING` / `CAB_APPROVAL_PENDING` post to `RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL`
+and store the thread. Pre-prod posts the sync PR to the **PR review** channel (not PCM); merge
+is gated by **GitHub PR reviews** via `github watch`, not Slack approve.
 (`GET .../pulls/{n}/reviews`: `APPROVED` / `CHANGES_REQUESTED`). `github watch`
 `github watch --status` reads `.github-watch.lock` and reports whether that pid is still
 alive, so you do not start a second poller. A second `github watch` exits if one is running.
 A verdict calls `WorkflowExecutor.advance`. After pre-prod merge it *posts* Slack thread replies
-that the PR is merged and the build is progressing, then that the build succeeded.
+that the PR is merged and the build is progressing, **triggers Netlify `develop` HEAD builds**
+(`POST /sites/{id}/builds?branch=develop` on US/MX sites; skipped on `RETRY_PREPROD_DEPLOY` if that
+site already succeeded this sync), then that the `pre-prod-1` build succeeded.
 `mlx_lm.server` is not involved. Actions never call `engine.transition()`.
 
 Bot scopes: `chat:write`, `channels:history` or `groups:history`, `users:read`. The bot must
@@ -368,7 +372,8 @@ GitHub, no SLM — everything logs stubs). The CLI loads `./.env` on startup via
 | `RELEASE_OPERATOR_JIRA_EXTRA_FIELDS` | `{}` | JSON object merged into Jira `fields` |
 | `RELEASE_OPERATOR_JIRA_EMAIL` / `RELEASE_OPERATOR_JIRA_TOKEN` | *(unset)* | API-token MCP fallback |
 | `RELEASE_OPERATOR_SLACK_BOT_TOKEN` | *(unset = Slack actions no-op)* | Slack bot token (`xoxb-…`) |
-| `RELEASE_OPERATOR_SLACK_CHANNEL` | *(unset = posts skipped)* | Channel id `C…` or `#name` |
+| `RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW` | *(unset = PR notices skipped)* | Release + pre-prod PR review channel `C…` |
+| `RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL` | *(unset = QA/CAB posts skipped)* | PCM QA/CAB approval channel `C…` |
 
 ## CLI command map (`src/cli.ts`)
 

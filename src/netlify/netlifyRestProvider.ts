@@ -1,5 +1,5 @@
 import { NetlifyServiceError } from "../errors.js";
-import type { NetlifyDeploy, NetlifyProvider } from "./types.js";
+import type { NetlifyBuild, NetlifyDeploy, NetlifyProvider } from "./types.js";
 
 const NETLIFY_API_BASE = "https://api.netlify.com/api/v1";
 
@@ -61,7 +61,11 @@ export class NetlifyRestProvider implements NetlifyProvider {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  private async getJson(path: string, query?: Record<string, string>): Promise<unknown> {
+  private async requestJson(
+    method: "GET" | "POST",
+    path: string,
+    query?: Record<string, string>
+  ): Promise<unknown> {
     const url = new URL(`${NETLIFY_API_BASE}${path}`);
     if (query) {
       for (const [key, value] of Object.entries(query)) {
@@ -71,7 +75,7 @@ export class NetlifyRestProvider implements NetlifyProvider {
     let res: Response;
     try {
       res = await this.fetchImpl(url.toString(), {
-        method: "GET",
+        method,
         headers: {
           Authorization: `Bearer ${this.token}`,
           Accept: "application/json",
@@ -83,13 +87,18 @@ export class NetlifyRestProvider implements NetlifyProvider {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new NetlifyServiceError(`Netlify API GET ${path} returned HTTP ${res.status}: ${text.slice(0, 400)}`);
+      throw new NetlifyServiceError(`Netlify API ${method} ${path} returned HTTP ${res.status}: ${text.slice(0, 400)}`);
     }
+    if (!text.trim()) return {};
     try {
       return JSON.parse(text) as unknown;
     } catch {
-      throw new NetlifyServiceError(`Netlify API GET ${path} returned non-JSON (HTTP ${res.status})`);
+      throw new NetlifyServiceError(`Netlify API ${method} ${path} returned non-JSON (HTTP ${res.status})`);
     }
+  }
+
+  private async getJson(path: string, query?: Record<string, string>): Promise<unknown> {
+    return this.requestJson("GET", path, query);
   }
 
   private async listMainDeploys(siteId: string): Promise<unknown[]> {
@@ -139,5 +148,25 @@ export class NetlifyRestProvider implements NetlifyProvider {
       if (parsed) return parsed;
     }
     return undefined;
+  }
+
+  async triggerBranchBuild(siteId: string, branch: string): Promise<NetlifyBuild> {
+    const encoded = encodeURIComponent(siteId);
+    const payload = asRecord(
+      await this.requestJson("POST", `/sites/${encoded}/builds`, { branch })
+    );
+    const id = stringField(payload, "id");
+    if (!id) {
+      throw new NetlifyServiceError(
+        `Netlify API POST /sites/${siteId}/builds returned no build id`
+      );
+    }
+    const deployId = stringField(payload, "deploy_id");
+    const sha = stringField(payload, "sha");
+    return {
+      id,
+      ...(deployId ? { deployId } : {}),
+      ...(sha ? { sha } : {}),
+    };
   }
 }

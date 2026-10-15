@@ -139,6 +139,8 @@ export class GithubMcpProvider implements GithubProvider {
       url: firstString(parsed, ["html_url", "url"]),
       title: firstString(parsed, ["title"]),
       body: firstString(parsed, ["body"]),
+      merged: parsed.merged === true,
+      mergeCommitSha: firstString(parsed, ["merge_commit_sha"]),
       raw: text,
     };
   }

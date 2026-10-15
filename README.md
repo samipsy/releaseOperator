@@ -245,8 +245,12 @@ read QA/CAB reply threads (`conversations.replies`).
 1. Create a Slack app with bot scopes `chat:write`, `channels:history` (or `groups:history`
    for private channels), and `users:read`.
 2. Install it to the workspace and invite the bot to the channel.
-3. Set `RELEASE_OPERATOR_SLACK_BOT_TOKEN` and `RELEASE_OPERATOR_SLACK_CHANNEL` (prefer the
-   `C…` channel id).
+3. Set `RELEASE_OPERATOR_SLACK_BOT_TOKEN`, plus channel ids:
+   - `RELEASE_OPERATOR_SLACK_CHANNEL_PR_REVIEW` — release PRs and pre-prod sync PRs
+   - `RELEASE_OPERATOR_SLACK_CHANNEL_PCM_APPROVAL` — PCM QA / CAB approve/reject
+
+   **Find a channel id:** open the channel in Slack → channel name → *View channel details* →
+   scroll to the bottom for `Channel ID` (`C…`). Invite the bot to both channels.
 
 ```bash
 npm run cli -- slack ping
@@ -255,10 +259,10 @@ npm run cli -- github watch --status
 npm run cli -- slack ingest-approvals <releaseId>   # one-shot Slack read (QA/CAB only)
 npm run cli -- netlify deploys landings
 npm run cli -- preprod create landings
-# develop → pre-prod-1 PR; Approve on GitHub; watch:github merges and watches Netlify
+# develop → pre-prod-1 PR; Approve on GitHub; watch:github merges, rebuilds develop HEAD, watches pre-prod-1
 ```
 
-`mlx:serve` is only the local Qwen HTTP inference process. `watch:github` polls **GitHub PR reviews** for pre-prod (Approve / Request changes) about once a minute, then merges and watches Netlify. It does not poll Slack. After a pre-prod merge it still *posts* Slack thread replies that the PR is merged and that the build succeeded.
+`mlx:serve` is only the local Qwen HTTP inference process. `watch:github` polls **GitHub PR reviews** (Approve → merge) and **Netlify pre-prod-1 deploys** about once a minute. After merge it also **triggers a Netlify build of current `develop` HEAD** on the mapped US/MX sites (`POST /sites/{id}/builds?branch=develop` — not a retry of the last deploy SHA). `RETRY_PREPROD_DEPLOY` does not retrigger `develop` for a site whose HEAD build already succeeded in this sync. CLI commands do not block on Netlify. After merge it posts Slack that the PR is merged; after Netlify `pre-prod-1` is ready it posts that the build succeeded.
 
 Manual `event QA_APPROVED --payload '{"approvedBy":"..."}'` still works.
 

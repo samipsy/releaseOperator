@@ -115,10 +115,10 @@ const preprodMerged: Guard = (release) => {
   return sha.length > 0 ? ok() : fail("PREPROD_MERGED needs a merge SHA from GitHub");
 };
 
-const preprodDeploySucceeded: Guard = (release) => {
-  return release.deployment?.status === "success"
-    ? ok()
-    : fail("Netlify pre-prod deploys have not completed successfully yet");
+const preprodDeploySucceeded: Guard = (release, event) => {
+  if (release.deployment?.status === "success") return ok();
+  if (event.payload?.verified === true) return ok();
+  return fail("Netlify pre-prod deploys have not completed successfully yet");
 };
 
 /** Guards keyed by "fromState:eventType". A transition with no entry here is unconditionally allowed. */

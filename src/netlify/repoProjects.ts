@@ -63,3 +63,8 @@ export function netlifyProjectsForRepos(repoNames: string[]): RepoNetlifyProject
   }
   return matched;
 }
+
+/** Flattened US + MX site rows for poll/trigger loops. */
+export function netlifySitesForRepos(repoNames: string[]): NetlifySiteRef[] {
+  return netlifyProjectsForRepos(repoNames).flatMap((pair) => [pair.us, pair.mx]);
+}
